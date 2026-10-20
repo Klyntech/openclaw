@@ -8,6 +8,7 @@ import {
   closeOpenClawStateDatabaseForTest,
 } from "./openclaw-state-db.js";
 import { prepareUserProfileCatalog } from "./user-profile-list.js";
+import { syncGitHubIdentity } from "./user-profile-writes.worker.js";
 
 export function useProfileDatabase(prefix: string) {
   const releases: Array<() => void> = [];
@@ -29,6 +30,22 @@ export function useProfileDatabase(prefix: string) {
   return {
     options,
     tempDirs,
+    github: (
+      accountId: number,
+      login: string,
+      fields: { alias?: string; email?: string; name?: string; initialName?: string } = {},
+    ) =>
+      syncGitHubIdentity(
+        {
+          identity: { accountId, login, name: fields.name },
+          authenticationAlias:
+            fields.email === undefined
+              ? { kind: "github-login", login: fields.alias ?? login }
+              : { kind: "email", email: fields.email },
+          initialDisplayName: fields.initialName,
+        },
+        options,
+      ),
     hydrate: async () => {
       releases.push((await prepareUserProfileCatalog(options)).release);
     },
