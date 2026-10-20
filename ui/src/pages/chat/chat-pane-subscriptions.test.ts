@@ -22,6 +22,7 @@ import {
   createRenderTestChatPane,
   createTestChatPane,
   getPaneTestRuntime,
+  type TestChatPane,
 } from "./chat-pane.test-support.ts";
 import { chatRunPresentation } from "./chat-run-presentation.ts";
 import { handlePageGatewayEvent } from "./chat-state-events.ts";
@@ -143,17 +144,22 @@ describe("chat pane approval replay subscriptions", () => {
   );
 });
 
+function observeRender<T>(pane: TestChatPane, read: () => T) {
+  const rendered: T[] = [];
+  const render = vi.fn(() => {
+    rendered.push(read());
+    return { layout: null, capabilityDialogs: undefined, providerReviewSource: undefined };
+  });
+  pane.render = render;
+  return { rendered, render };
+}
+
 it("projects composer capability changes and catches up a parked pane on reveal", async () => {
   const fixture = createMountedPanes([{ key: "main", kind: "direct", updatedAt: 1 }]);
   const { pane } = fixture;
   const capabilities = getPaneTestRuntime(pane).composerCapabilities;
   const view = () => capabilities.dialogView(pane.context, pane.state, undefined);
-  const rendered: boolean[] = [];
-  const render = vi.fn(() => {
-    rendered.push(view().open);
-    return { layout: null, capabilityDialogs: undefined, providerReviewSource: undefined };
-  });
-  pane.render = render;
+  const { rendered, render } = observeRender(pane, () => view().open);
   onTestFinished(() => pane.disconnectedCallback());
   fixture.mount("main");
   await pane.updateComplete;
@@ -193,24 +199,14 @@ vi.mock("../../app/native-gateways.runtime.ts", async (importOriginal) => ({
 it("updates native locality synchronously and catches up parked panes on reveal", async () => {
   let snapshot: NativeGatewaysSnapshot = {
     currentId: "local",
-    gateways: [
-      {
-        id: "local",
-        name: "Local",
-        kind: "local",
-        isPrimary: true,
-        canPromote: false,
-        health: "ok",
-      },
-      {
-        id: "remote",
-        name: "Remote",
-        kind: "remote",
-        isPrimary: false,
-        canPromote: true,
-        health: "ok",
-      },
-    ],
+    gateways: (["local", "remote"] as const).map((kind) => ({
+      id: kind,
+      name: kind === "local" ? "Local" : "Remote",
+      kind,
+      isPrimary: kind === "local",
+      canPromote: kind === "remote",
+      health: "ok" as const,
+    })),
   };
   const listeners = new Set<(next: NativeGatewaysSnapshot) => void>();
   native.capability = {
@@ -235,12 +231,7 @@ it("updates native locality synchronously and catches up parked panes on reveal"
     client: createGatewayBrowserClientFixture(),
   });
   const file = { path: "file.ts", root: "/workspace" };
-  const rendered: Array<string | null> = [];
-  const render = vi.fn(() => {
-    rendered.push(localEditorFilePath(file));
-    return { layout: null, capabilityDialogs: undefined, providerReviewSource: undefined };
-  });
-  pane.render = render;
+  const { rendered, render } = observeRender(pane, () => localEditorFilePath(file));
   onTestFinished(() => {
     pane.disconnectedCallback();
     native.capability = null;
@@ -288,12 +279,7 @@ it("parks and remounts presentation subscriptions using the runtime's context wi
     };
   });
   const pluginSubscriptions = vi.spyOn(pane.context.plugins, "subscribe");
-  const rendered: boolean[] = [];
-  const render = vi.fn(() => {
-    rendered.push(navigation.snapshot.navCollapsed);
-    return { layout: null, capabilityDialogs: undefined, providerReviewSource: undefined };
-  });
-  pane.render = render;
+  const { rendered, render } = observeRender(pane, () => navigation.snapshot.navCollapsed);
   onTestFinished(() => {
     pane.disconnectedCallback();
     vi.restoreAllMocks();
