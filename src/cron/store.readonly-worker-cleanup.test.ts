@@ -1,30 +1,21 @@
 import fs from "node:fs/promises";
-import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import * as snapshots from "../infra/sqlite-readonly-location-cleanup.js";
 import { WorkerTaskPool } from "../infra/worker-task-pool.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "../state/openclaw-state-db-cache.js";
-import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../state/openclaw-state-db.js";
-import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
-import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { loadCronJobsStoreWithConfigJobsReadOnly } from "./store.js";
 import { installCronSnapshotFaults } from "./store.readonly-worker-faults.test-support.js";
+import { withCronStore } from "./store.worker.test-support.js";
 
 it.each(["worker", "snapshot"] as const)(
   "retains %s cleanup custody without losing a completed read",
   async (failureStage) => {
-    await withOpenClawTestState(
-      { label: "cron-readonly-cleanup", env: { XDG_CACHE_HOME: undefined } },
+    await withCronStore(
+      "cron-readonly-cleanup",
       async (state) => {
-        const databasePath = resolveOpenClawStateSqlitePath(state.env);
-        await fs.mkdir(path.dirname(databasePath), { recursive: true });
-        const db = new DatabaseSync(databasePath);
-        db.exec("CREATE TABLE marker(value TEXT)");
-        db.close();
+        await state.createDatabase();
         const failure = new Error("controlled worker retirement failure");
         const terminate = vi.spyOn(Worker.prototype, "terminate");
         const fault =
@@ -55,12 +46,7 @@ it.each(["worker", "snapshot"] as const)(
             return release;
           });
         try {
-          const reading = withArtifactPreservingStateReads(() =>
-            loadCronJobsStoreWithConfigJobsReadOnly(
-              state.statePath("cron", "jobs.json"),
-              state.env,
-            ),
-          );
+          const reading = state.read(true);
           if (failureStage === "worker") {
             await expect(reading).rejects.toBe(failure);
           } else {
@@ -80,17 +66,13 @@ it.each(["worker", "snapshot"] as const)(
           expect(terminate).toHaveBeenCalledTimes(1);
 
           fault?.allowRemoval();
-          await closeOpenClawStateDatabaseByPathAsync(databasePath);
+          await state.close();
           await snapshots.cleanupSnapshotOperations();
           for (const retained of directories) {
             await expect(fs.stat(retained)).rejects.toMatchObject({ code: "ENOENT" });
           }
           expect(terminate).toHaveBeenCalledTimes(failureStage === "worker" ? 2 : 1);
-          const next = await loadCronJobsStoreWithConfigJobsReadOnly(
-            state.statePath("cron", "jobs.json"),
-            state.env,
-          );
-          expect(next.store.jobs).toEqual([]);
+          expect((await state.read()).store.jobs).toEqual([]);
         } finally {
           terminate.mockRestore();
           fault?.allowRemoval();
@@ -110,17 +92,14 @@ it.each(["worker", "snapshot"] as const)(
           }
         }
       },
+      { XDG_CACHE_HOME: undefined },
     );
   },
 );
 
 it("refuses new reader admission while canonical close is draining an earlier reader", async () => {
-  await withOpenClawTestState({ label: "cron-readonly-drain" }, async (state) => {
-    const databasePath = resolveOpenClawStateSqlitePath(state.env);
-    await fs.mkdir(path.dirname(databasePath), { recursive: true });
-    const db = new DatabaseSync(databasePath);
-    db.exec("CREATE TABLE marker(value TEXT)");
-    db.close();
+  await withCronStore("cron-readonly-drain", async (state) => {
+    await state.createDatabase();
     const entered = createDeferred();
     const finish = createDeferred();
     const draining = createDeferred();
@@ -138,18 +117,16 @@ it("refuses new reader admission while canonical close is draining an earlier re
         await finish.promise;
         return await terminate.call(this);
       });
-    const read = () =>
-      loadCronJobsStoreWithConfigJobsReadOnly(state.statePath("cron", "jobs.json"), state.env);
-    const first = read().then(
+    const first = state.read().then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
     );
     let closing: Promise<boolean> | undefined;
     try {
       await entered.promise;
-      closing = closeOpenClawStateDatabaseByPathAsync(databasePath);
+      closing = state.close();
       await draining.promise;
-      await expect(read()).rejects.toMatchObject({
+      await expect(state.read()).rejects.toMatchObject({
         code: "STATE_DATABASE_READ_ADMISSION_INVALIDATED",
       });
     } finally {
@@ -159,6 +136,6 @@ it("refuses new reader admission while canonical close is draining an earlier re
       unregister();
     }
     expect(await first).toMatchObject({ error: expect.any(Error) });
-    expect((await read()).store.jobs).toEqual([]);
+    expect((await state.read()).store.jobs).toEqual([]);
   });
 });

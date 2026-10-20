@@ -35,10 +35,9 @@ describe("cron quarantine", () => {
       /Unsupported cron quarantine file shape/,
     );
 
-    const preserved = JSON.parse(await fs.readFile(quarantinePath, "utf-8")) as {
-      jobs: Array<Record<string, unknown>>;
-    };
-    expect(preserved.jobs[0]?.raw).toBe("keep-me");
+    expect(JSON.parse(await fs.readFile(quarantinePath, "utf-8"))).toMatchObject({
+      jobs: [{ raw: "keep-me" }],
+    });
   });
 
   it("preserves recovery rows when maintenance authority expires before worker dispatch", async () => {
@@ -115,20 +114,17 @@ describe("cron quarantine", () => {
       if (recovery) {
         await saveCronQuarantinedJobs({ storePath, nowMs: 123, entries: [entry] });
       }
+      const options = recovery
+        ? { deleteQuarantineEntries: [entry] }
+        : { quarantine: { nowMs: 123, entries: [entry] } };
       const database = openOpenClawStateDatabase().db;
       database.exec(
         "CREATE TRIGGER fail_cron_recovery_update BEFORE UPDATE ON cron_jobs BEGIN SELECT RAISE(ABORT, 'cron recovery rejected'); END",
       );
       try {
-        await expect(
-          saveCronJobsStore(
-            storePath,
-            store,
-            recovery
-              ? { deleteQuarantineEntries: [entry] }
-              : { quarantine: { nowMs: 123, entries: [entry] } },
-          ),
-        ).rejects.toThrow("cron recovery rejected");
+        await expect(saveCronJobsStore(storePath, store, options)).rejects.toThrow(
+          "cron recovery rejected",
+        );
         expect(await loadCronQuarantinedJobs(storePath)).toEqual(
           recovery ? [{ ...entry, quarantinedAtMs: 123 }] : [],
         );
@@ -138,7 +134,7 @@ describe("cron quarantine", () => {
       }
 
       if (recovery) {
-        await saveCronJobsStore(storePath, store, { deleteQuarantineEntries: [entry] });
+        await saveCronJobsStore(storePath, store, options);
         expect(await loadCronQuarantinedJobs(storePath)).toEqual([]);
       }
     },

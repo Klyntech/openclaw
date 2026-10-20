@@ -103,16 +103,10 @@ it.each(["trigger", "payload"] as const)(
           ownerSessionKey,
           ownerAccountId: accountId,
         },
-        ...(callerOrigin
-          ? {
-              toolsAllowProvenance: {
-                version: 1,
-                source: "final-executable-surface",
-                callerOrigin,
-              },
-            }
-          : {}),
       };
+      if (callerOrigin) {
+        job.toolsAllowProvenance = { version: 1, source: "final-executable-surface", callerOrigin };
+      }
       const params = {
         job,
         script,
@@ -136,31 +130,22 @@ it.each(["trigger", "payload"] as const)(
     };
     const expected =
       entry === "trigger" ? { kind: "evaluated", fire: false } : { kind: "completed" };
-    const first = await invoke("work", { kind: "external", channel: "telegram" });
-    expect(first, JSON.stringify(first)).toMatchObject(expected);
-    expect(sendText).toHaveBeenCalledOnce();
-    expect(sendText.mock.calls[0]?.[0]).toMatchObject({ accountId: "work" });
-    for (const origin of [{ kind: "external", channel: "slack" }, undefined] as const) {
-      await expect(invoke("work", origin)).resolves.toMatchObject({
-        kind: "error",
-        error: expect.stringContaining('Scheduled account "work" is unavailable'),
-      });
-      expect(sendText).toHaveBeenCalledOnce();
-    }
-    await expect(invoke("work", { kind: "external", channel: "telegram" })).resolves.toMatchObject(
-      expected,
-    );
-    expect(sendText).toHaveBeenCalledTimes(2);
-    for (const [accountId, error] of [
-      ["missing", 'Scheduled account "missing" is unavailable'],
-      ["disabled", "disabled"],
+    for (const [accountId, channel, error, sends] of [
+      ["work", "telegram", undefined, 1],
+      ["work", "slack", 'Scheduled account "work" is unavailable', 1],
+      ["work", undefined, 'Scheduled account "work" is unavailable', 1],
+      ["work", "telegram", undefined, 2],
+      ["missing", "telegram", 'Scheduled account "missing" is unavailable', 2],
+      ["disabled", "telegram", "disabled", 2],
     ] as const) {
-      const rejected = await invoke(accountId, { kind: "external", channel: "telegram" });
-      expect(rejected, JSON.stringify(rejected)).toMatchObject({
-        kind: "error",
-        error: expect.stringContaining(error),
-      });
-      expect(sendText).toHaveBeenCalledTimes(2);
+      const result = await invoke(accountId, channel ? { kind: "external", channel } : undefined);
+      expect(result, JSON.stringify(result)).toMatchObject(
+        error ? { kind: "error", error: expect.stringContaining(error) } : expected,
+      );
+      expect(sendText).toHaveBeenCalledTimes(sends);
+      if (!error && sends === 1) {
+        expect(sendText.mock.calls[0]?.[0]).toMatchObject({ accountId: "work" });
+      }
     }
   },
 );
