@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   normalizeAgentCommandModelRef,
   parseAgentCommandModelRef,
 } from "../agents/command/model-ref.js";
+import { makeModel } from "../agents/embedded-agent-runner/model.test-harness.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withPluginRuntimePluginScope } from "../plugins/runtime/gateway-request-scope.js";
@@ -13,13 +14,7 @@ import {
 } from "./server-plugin-subagent-runtime.js";
 
 const dispatch = vi.hoisted(() =>
-  vi.fn(
-    async (
-      _method: string,
-      _params: Record<string, unknown>,
-      _options?: { sessionMutationCommitGuard?: () => void },
-    ) => ({ runId: "override-run" }),
-  ),
+  vi.fn(async (_method: string, _params: Record<string, unknown>) => ({ runId: "override-run" })),
 );
 vi.mock("./server-plugin-in-process-dispatch.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./server-plugin-in-process-dispatch.js")>()),
@@ -30,13 +25,11 @@ vi.mock("../agents/provider-model-normalization.runtime.js", () => ({
     provider: string;
     context: { modelId: string };
   }) =>
-    params.provider !== "fixture"
-      ? undefined
-      : params.context.modelId === "literal"
-        ? "permitted"
-        : params.context.modelId === "permitted"
-          ? "different"
-          : undefined,
+    params.provider === "fixture"
+      ? new Map(Object.entries({ literal: "permitted", permitted: "different" })).get(
+          params.context.modelId,
+        )
+      : undefined,
 }));
 
 let config: OpenClawConfig;
@@ -49,16 +42,7 @@ beforeEach(() => {
       providers: {
         fixture: {
           baseUrl: "https://fixture.invalid/v1",
-          models: [
-            {
-              id: "literal",
-              name: "Literal",
-              reasoning: false,
-              input: ["text"],
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-              maxTokens: 8192,
-            },
-          ],
+          models: [],
         },
       },
     },
@@ -93,41 +77,35 @@ function run(override: { provider?: string; model?: string }) {
   );
 }
 
-describe("plugin subagent initial override policy", () => {
-  it("checks the exact configured execution target", async () => {
-    await expect(run({ provider: "fixture", model: "literal" })).rejects.toThrow(
-      /not allowlisted/u,
-    );
-    expect(dispatch).not.toHaveBeenCalled();
-  });
+it("checks the exact configured execution target", async () => {
+  config.models!.providers!.fixture!.models = [makeModel("literal")];
+  await expect(run({ provider: "fixture", model: "literal" })).rejects.toThrow(/not allowlisted/u);
+  expect(dispatch).not.toHaveBeenCalled();
+});
 
-  it("preserves an explicit API owner without configured model rows", async () => {
-    config.models!.providers!.fixture!.api = "openai-completions";
-    config.models!.providers!.fixture!.models = [];
-    await expect(run({ model: "fixture/literal" })).rejects.toThrow(/not allowlisted/u);
-    expect(dispatch).not.toHaveBeenCalled();
-  });
+it("preserves an explicit API owner without configured model rows", async () => {
+  config.models!.providers!.fixture!.api = "openai-completions";
+  await expect(run({ model: "fixture/literal" })).rejects.toThrow(/not allowlisted/u);
+  expect(dispatch).not.toHaveBeenCalled();
+});
 
-  it.each([{ provider: "fixture", model: "literal" }, { model: "fixture/literal" }])(
-    "preserves command selection for %j with chained aliases",
-    async (override) => {
-      config.models!.providers!.fixture!.models = [];
-      await expect(run(override)).resolves.toMatchObject({ runId: "override-run" });
-      const request = dispatch.mock.calls[0]?.[1];
-      expect(request).toMatchObject(override);
-      const model = request?.model as string;
-      const selected = request?.provider
-        ? normalizeAgentCommandModelRef(config, request.provider as string, model, {})
-        : parseAgentCommandModelRef(config, "worker", model, "", {});
-      expect(selected).toEqual({ provider: "fixture", model: "permitted" });
-    },
-  );
+it.each([{ provider: "fixture", model: "literal" }, { model: "fixture/literal" }])(
+  "preserves command selection for %j with chained aliases",
+  async (override) => {
+    await expect(run(override)).resolves.toMatchObject({ runId: "override-run" });
+    const request = dispatch.mock.calls[0]?.[1];
+    expect(request).toMatchObject(override);
+    const model = request?.model as string;
+    const selected = request?.provider
+      ? normalizeAgentCommandModelRef(config, request.provider as string, model, {})
+      : parseAgentCommandModelRef(config, "worker", model, "", {});
+    expect(selected).toEqual({ provider: "fixture", model: "permitted" });
+  },
+);
 
-  it("rejects a replaced configuration before admitting its prepared override", async () => {
-    config.models!.providers!.fixture!.models = [];
-    const pending = run({ provider: "fixture", model: "literal" });
-    config = { ...config };
-    await expect(pending).rejects.toThrow(/configuration changed before admission/u);
-    expect(dispatch).not.toHaveBeenCalled();
-  });
+it("rejects a replaced configuration before admitting its prepared override", async () => {
+  const pending = run({ provider: "fixture", model: "literal" });
+  config = { ...config };
+  await expect(pending).rejects.toThrow(/configuration changed before admission/u);
+  expect(dispatch).not.toHaveBeenCalled();
 });

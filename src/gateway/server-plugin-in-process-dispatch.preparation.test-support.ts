@@ -19,37 +19,52 @@ export function registerInProcessGatewayDispatchPreparationTests({
     { method: "agent.wait", outcome: "current" },
     { method: "agent.wait", outcome: "replaced" },
     { method: "agent.wait", outcome: "retired-factory" },
+    { method: "health", outcome: "current" },
+    { method: "health", outcome: "replaced" },
   ])(
-    "refreshes source authority after $method facade preparation with a $outcome Gateway",
+    "revalidates $method after preparation with a $outcome Gateway",
     async ({ method, outcome }) => {
-      const context = createContext();
-      let current = context;
       const gate = heldWork();
-      const createFacade = context.createAgentTurnFacade!;
-      context.createAgentTurnFacade = async (principal) => {
-        await gate.run();
-        return createFacade(principal);
-      };
+      const response =
+        method === "health" ? { ok: true } : { runId: "prepared-source", status: "accepted" };
+      const handler = vi.fn(({ respond }: GatewayRequestHandlerOptions) => respond(true, response));
+      const handlers = createLazyCoreHandlers({
+        methods: ["health"],
+        loadHandlers: async () => {
+          await gate.run();
+          return { health: handler };
+        },
+      });
+      const context = createContext(
+        method === "health" ? [["health", "operator.read", "test", handlers.health!]] : [],
+      );
+      let current = context;
+      if (method !== "health") {
+        const createFacade = context.createAgentTurnFacade!;
+        context.createAgentTurnFacade = async (principal) => {
+          await gate.run();
+          return createFacade(principal);
+        };
+      }
       const prepareDispatchCurrent = vi.fn(async () => {
         if (outcome === "replaced") {
           current = createContext();
         }
       });
-      const response = { runId: "prepared-source", status: "accepted" };
       startTurn.mockImplementation(async ({ io }) => io.emitAcceptance([true, response]));
       waitForTurn.mockResolvedValue({ result: response });
-      const pending = dispatchGatewayMethodInProcess(
-        method,
+      const params =
         method === "agent"
           ? { message: "prepared turn", idempotencyKey: "prepared-source" }
-          : { runId: "prepared-source" },
-        {
-          forceSyntheticClient: true,
-          operatorRoleActor: { kind: "system" },
-          resolveGatewayContext: () => current,
-          ...(outcome === "retired-factory" ? {} : { prepareDispatchCurrent }),
-        },
-      );
+          : method === "agent.wait"
+            ? { runId: "prepared-source" }
+            : {};
+      const pending = dispatchGatewayMethodInProcess(method, params, {
+        forceSyntheticClient: true,
+        operatorRoleActor: { kind: "system" },
+        resolveGatewayContext: () => current,
+        ...(outcome === "retired-factory" ? {} : { prepareDispatchCurrent }),
+      });
       const result =
         outcome === "current"
           ? expect(pending).resolves.toEqual(response)
@@ -62,54 +77,11 @@ export function registerInProcessGatewayDispatchPreparationTests({
       gate.release();
       await result;
       expect(prepareDispatchCurrent).toHaveBeenCalledTimes(outcome === "retired-factory" ? 0 : 1);
-      expect(startTurn).toHaveBeenCalledTimes(outcome === "current" && method === "agent" ? 1 : 0);
+      expect(startTurn).toHaveBeenCalledTimes(Number(outcome === "current" && method === "agent"));
       expect(waitForTurn).toHaveBeenCalledTimes(
-        outcome === "current" && method === "agent.wait" ? 1 : 0,
+        Number(outcome === "current" && method === "agent.wait"),
       );
-    },
-  );
-
-  it.each(["current", "replaced"])(
-    "checks a %s Gateway after raw dispatch preparation before invoking its handler",
-    async (outcome) => {
-      const gate = heldWork();
-      const handler = vi.fn(({ respond }: GatewayRequestHandlerOptions) => {
-        respond(true, { ok: true });
-      });
-      const handlers = createLazyCoreHandlers({
-        methods: ["health"],
-        loadHandlers: async () => {
-          await gate.run();
-          return { health: handler };
-        },
-      });
-      const context = createContext([["health", "operator.read", "test", handlers.health!]]);
-      let current = context;
-      const prepareDispatchCurrent = vi.fn(async () => {
-        if (outcome === "replaced") {
-          current = createContext();
-        }
-      });
-      const pending = dispatchGatewayMethodInProcess(
-        "health",
-        {},
-        {
-          forceSyntheticClient: true,
-          operatorRoleActor: { kind: "system" },
-          resolveGatewayContext: () => current,
-          prepareDispatchCurrent,
-        },
-      );
-      await gate.entered;
-      expect(prepareDispatchCurrent).not.toHaveBeenCalled();
-      gate.release();
-      if (outcome === "current") {
-        await expect(pending).resolves.toEqual({ ok: true });
-      } else {
-        await expect(pending).rejects.toThrow("current gateway instance binding");
-      }
-      expect(prepareDispatchCurrent).toHaveBeenCalledOnce();
-      expect(handler).toHaveBeenCalledTimes(outcome === "current" ? 1 : 0);
+      expect(handler).toHaveBeenCalledTimes(Number(outcome === "current" && method === "health"));
     },
   );
 }

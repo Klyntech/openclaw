@@ -1,8 +1,9 @@
 import { expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
 import * as pluginLoader from "../plugins/loader.js";
 import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import { createPluginRegistry } from "../plugins/registry.js";
+import { createTestPluginRegistry } from "../plugins/registry-runtime.test-helpers.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
@@ -16,12 +17,11 @@ import { loadGatewayPlugins } from "./server-plugins.js";
 
 it.each(["caller", "plugin", "gateway", "role"] as const)(
   "keeps registered profile preparation bound to its original targets and %s lifetime",
-  async (closedOwner) => {
-    await withOpenClawTestState({ scenario: "minimal" }, async () => {
+  (closedOwner) =>
+    withOpenClawTestState({ scenario: "minimal" }, async () => {
       const fixture = await createFixture("operator.read");
       const registry = createRequestGatewayMethodRegistry();
       fixture.context.getGatewayMethodRegistry = () => registry;
-      const logger = { info() {}, warn() {}, error() {}, debug() {} };
       let runtime = createPluginRuntime();
       let retireGateway: (() => void) | undefined;
       const resolveGatewayContext = vi.fn(() => fixture.context);
@@ -49,11 +49,7 @@ it.each(["caller", "plugin", "gateway", "role"] as const)(
           loader.mockRestore();
         }
       }
-      const plugins = createPluginRegistry({
-        runtime,
-        logger,
-        activateGlobalSideEffects: false,
-      });
+      const plugins = createTestPluginRegistry(runtime);
       const record = createPluginRecord({ id: "visitor-access", origin: "bundled" });
       const untrustedRecord = createPluginRecord({ id: "untrusted-profile", origin: "workspace" });
       const api = plugins.createApi(record, { config: fixture.cfg });
@@ -89,20 +85,15 @@ it.each(["caller", "plugin", "gateway", "role"] as const)(
         await expect(
           withPluginRuntimeGatewayRequestScope(scope, () => untrusted(params, callback)),
         ).rejects.toThrow();
-        await expect(
-          scoped({ ...params, emails: ["other@example.test"] }, callback),
-        ).rejects.toThrow("user profile not found");
-        await expect(scoped({ ...params, githubAccountIds: [84] }, callback)).rejects.toThrow(
-          "user profile not found",
-        );
+        for (const invalid of [{ emails: ["other@example.test"] }, { githubAccountIds: [84] }]) {
+          await expect(scoped({ ...params, ...invalid }, callback)).rejects.toThrow(
+            "user profile not found",
+          );
+        }
         expect(callback).not.toHaveBeenCalled();
         let retained: (() => void) | undefined;
         resolveGatewayContext.mockClear();
-        const mutable = {
-          ...params,
-          emails: [...params.emails],
-          githubAccountIds: [...params.githubAccountIds],
-        };
+        const mutable = structuredClone(params);
         const preparing = scoped(mutable, async (assertCurrent) => {
           assertCurrent();
           linkEmail(unselected, other.id);
@@ -124,7 +115,6 @@ it.each(["caller", "plugin", "gateway", "role"] as const)(
           assertCurrent();
           retained = assertCurrent;
         });
-        expect(retained).toBeDefined();
         expect(retained).toThrow();
 
         const gate = heldWork();
@@ -135,12 +125,11 @@ it.each(["caller", "plugin", "gateway", "role"] as const)(
           applied = true;
         });
         try {
-          await Promise.race([
+          await awaitGateBeforeSettlement(
             gate.entered,
-            pending.then(() => {
-              throw new Error("Profile callback was not reached");
-            }),
-          ]);
+            pending,
+            "Profile callback was not reached",
+          );
           if (closedOwner === "caller") {
             fixture.access.abort(new Error("Synthetic caller grant retired"));
           } else if (closedOwner === "gateway") {
@@ -164,6 +153,5 @@ it.each(["caller", "plugin", "gateway", "role"] as const)(
         await fixture.close();
         await fixture.removeSessions();
       }
-    });
-  },
+    }),
 );
