@@ -34,9 +34,12 @@ export function entryFixture(env: NodeJS.ProcessEnv, name = "test", agentId = "m
   };
 }
 
-export const test = it.extend<{ state: OpenClawTestState; store: ReturnType<typeof entryFixture> }>(
-  {
-    state: async ({ task: _task }, use) => withOpenClawTestState({ scenario: "minimal" }, use),
+export function sessionTests(
+  options: Parameters<typeof withOpenClawTestState>[0] = { scenario: "minimal" },
+) {
+  return it.extend<{ state: OpenClawTestState; store: ReturnType<typeof entryFixture> }>({
+    state: async ({ task: _task }, use) => withOpenClawTestState(options, use),
     store: async ({ state }, use) => use(entryFixture(state.env)),
-  },
-);
+  });
+}
+export const test = sessionTests();

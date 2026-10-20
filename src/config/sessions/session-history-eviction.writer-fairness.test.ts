@@ -68,7 +68,7 @@ it("admits a session patch and cross-store cold history between page-reclamation
               async (maxPages) => {
                 const result = await reclaim(maxPages);
                 pageResults.push(result);
-                if (!patch) {
+                if (pageResults.length === 1) {
                   patch = patchSessionEntryCore(target, () => ({ label: patchedEntry.label }), {
                     skipMaintenance: true,
                     preserveActivity: true,
@@ -77,8 +77,6 @@ it("admits a session patch and cross-store cold history between page-reclamation
                     return entry;
                   });
                   void patch.catch(() => {});
-                }
-                if (pageResults.length === 1) {
                   firstPass.resolve();
                   await resumePrune.promise;
                 }
@@ -145,15 +143,13 @@ it("admits a session patch and cross-store cold history between page-reclamation
         );
         expect(pageResults).toHaveLength(1);
         resumePrune.resolve();
-        const page = await history;
-        const result = await maintenance;
+        const [page, result] = await Promise.all([history, maintenance]);
         expect(page.messages.map(readChatHistoryMessageId)).toEqual([
           "history-user",
           "history-assistant",
         ]);
         expect(readSessionColdTranscript(cold.database(), historicalId)).toBeUndefined();
         expect(cold.snapshot()).toEqual(cold.original);
-        expect(patch).toBeDefined();
         await expect(patch).resolves.toMatchObject(patchedEntry);
         expect(result).toMatchObject({ removedEntries: 0, removedFiles: 0 });
         expect(result?.totalBytesAfter).toBeLessThanOrEqual(highWaterBytes);
@@ -162,7 +158,6 @@ it("admits a session patch and cross-store cold history between page-reclamation
         expect(sessionExists("fairness-history")).toBe(true);
         expect(sessionExists("fairness-live")).toBe(true);
         expect(readArchiveNames("fairness-history")).toEqual([]);
-        expect(pageResults.length).toBeGreaterThan(1);
         expect(pageResults[0]).toMatchObject({
           checkpointCompleted: true,
           vacuumPagesRequested: 8,

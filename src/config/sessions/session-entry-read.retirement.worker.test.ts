@@ -78,9 +78,7 @@ test.for(["refusal", "eviction"] as const)(
     try {
       const outcome = await Promise.race([
         reading.catch((error: unknown) => error),
-        cleanupEntered.promise.then(
-          () => new Error("Ordered read cleanup waits on its own queued writer"),
-        ),
+        cleanupEntered.promise.then(() => new Error("Cleanup waits on its queued writer")),
       ]);
       if (settlement === "refusal") {
         expect(outcome).toBeInstanceOf(SessionTranscriptProjectionUnavailableError);

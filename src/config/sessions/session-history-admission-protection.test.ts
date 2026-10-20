@@ -98,9 +98,7 @@ it.each(["UTF-8", "UTF-16le", "UTF-16be"] as const)(
       .prepare("SELECT session_key FROM session_nodes")
       .all()
       .map((row) => String(row.session_key));
-    for (const identity of identities) {
-      expected.add(identity);
-    }
+    identities.forEach((identity) => expected.add(identity));
     using admission = await protect(db, `synthetic-raw-admission-${encoding}`, identities);
     expect(admission.collect()).toEqual(expected);
   },

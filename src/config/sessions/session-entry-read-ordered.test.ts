@@ -70,21 +70,20 @@ test("retains immutable exact reads with per-store LRU eviction", async ({ state
     repeated.entries[0]!.entry.sessionId = "caller-mutated";
   }).toThrow(TypeError);
   expect((await read([keys[0]!])).entries[0]?.entry).toBe(repeated.entries[0]?.entry);
-  expect((await read([keys[0]!])).entries[0]?.entry.sessionId).toBe("entry-0");
-  expect((await readOther()).entries[0]?.entry.sessionId).toBe("other-store");
-  expect(requests.count()).toBe(0);
-
-  expect((await read([keys[128]!])).entries[0]?.entry.sessionId).toBe("entry-128");
-  expect(requests.count()).toBe(1);
-  requests.clear();
-  expect((await read([keys[0]!])).entries[0]?.entry.sessionId).toBe("entry-0");
-  expect((await readOther()).entries[0]?.entry.sessionId).toBe("other-store");
-  expect(requests.count()).toBe(0);
-  expect((await read([keys[1]!])).entries[0]?.entry.sessionId).toBe("entry-1");
-  expect(requests.count()).toBe(1);
-  requests.clear();
-  expect((await read([keys[1]!])).entries[0]?.entry.sessionId).toBe("entry-1");
-  expect(requests.count()).toBe(0);
+  for (const [index, otherStore, calls] of [
+    [0, true, 0],
+    [128, false, 1],
+    [0, true, 0],
+    [1, false, 1],
+    [1, false, 0],
+  ] as const) {
+    expect((await read([keys[index]!])).entries[0]?.entry.sessionId).toBe(`entry-${index}`);
+    if (otherStore) {
+      expect((await readOther()).entries[0]?.entry.sessionId).toBe("other-store");
+    }
+    expect(requests.count()).toBe(calls);
+    requests.clear();
+  }
   expect((await read([internal.sessionKey])).entries[0]?.entry.sessionId).toBe(internal.sessionId);
   expect((await read([internal.sessionKey], "list")).entries).toEqual([]);
 });
@@ -520,11 +519,7 @@ test("captures the physical source after its queued creation", async ({ state: {
     },
   );
   try {
-    await awaitGateBeforeSettlement(
-      readEntered.promise,
-      read,
-      "Cold reader did not reach admission",
-    );
+    await awaitGateBeforeSettlement(readEntered.promise, read, "Cold read bypassed admission");
     create.resolve();
     const [result] = await Promise.all([read, writer]);
     expect(result.entries[0]?.entry.sessionId).toBe("admitted-source");

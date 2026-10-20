@@ -72,12 +72,15 @@ async function finishInput(
 test("selects recovery claims and main-session startup orphans", async ({ store: { store } }) => {
   const { env } = store;
   const recovery = { cycleId: "interrupted-cycle", revision: 1, chargedAttempts: 0 };
-  const runs = [{ runId: "interrupted-run", lifecycleGeneration: "previous-gateway" }];
+  const runId = "interrupted-run";
+  const runs = [{ runId, lifecycleGeneration: "previous-gateway" }];
+  const terminalIds = { restartRecoveryTerminalRunIds: [runId] };
+  const terminal = { restartRecoveryRuns: runs, ...terminalIds };
   const entries: Record<string, Partial<InternalSessionEntry>> = {
     archived: { archivedAt: 1, mainRestartRecovery: recovery },
     empty: { restartRecoveryRuns: [] },
     settled: { status: "done" },
-    terminal: { restartRecoveryRuns: runs, restartRecoveryTerminalRunIds: ["interrupted-run"] },
+    terminal,
     tombstoned: { mainRestartRecovery: { ...recovery, tombstone: { reason: "exhausted" } } },
     "pending-cycle": { abortedLastRun: true, mainRestartRecovery: recovery },
     "pending-delivery": { status: "done", restartRecoveryDeliveryRunId: "delivery-run" },
@@ -86,20 +89,15 @@ test("selects recovery claims and main-session startup orphans", async ({ store:
       status: "done",
       pendingFinalDelivery: { createdAt: 1, kind: "transport-only" },
     },
-    "pending-residue": {
-      status: "done",
-      mainRestartRecovery: recovery,
-      restartRecoveryRuns: runs,
-      restartRecoveryTerminalRunIds: ["interrupted-run"],
-    },
+    "pending-residue": { status: "done", mainRestartRecovery: recovery, ...terminal },
     "orphan-aborted": { abortedLastRun: true },
     "orphan-interrupted": { status: "interrupted" },
     "settled-aborted": { abortedLastRun: false },
     "settled-interruption": {
       status: "interrupted",
       abortedLastRun: false,
-      lastRunId: "interrupted-run",
-      restartRecoveryTerminalRunIds: ["interrupted-run"],
+      lastRunId: runId,
+      ...terminalIds,
     },
     "archived-orphan": { archivedAt: 1, abortedLastRun: true },
     "subagent:orphan": { abortedLastRun: true },
@@ -114,28 +112,20 @@ test("selects recovery claims and main-session startup orphans", async ({ store:
     );
   }
 
-  const selected = await readSessionEntrySummariesInWorker({
-    ...store,
-    mainSessionRecovery: "claims",
-  });
-  const claimKeys = [
-    "agent:main:pending-cycle",
-    "agent:main:pending-delivery",
-    "agent:main:pending-execution",
-    "agent:main:pending-final",
-    "agent:main:pending-residue",
-  ];
-  expect(selected.map(({ sessionKey }) => sessionKey)).toEqual(claimKeys);
-  const orphans = await readSessionEntrySummariesInWorker({
-    ...store,
-    mainSessionRecovery: "orphans",
-  });
-  expect(orphans.map(({ sessionKey }) => sessionKey)).toEqual([
+  const keys = async (mainSessionRecovery?: "claims" | "orphans") =>
+    (await readSessionEntrySummariesInWorker({ ...store, mainSessionRecovery })).map(
+      ({ sessionKey }) => sessionKey,
+    );
+  const claims = ["cycle", "delivery", "execution", "final", "residue"].map(
+    (suffix) => `agent:main:pending-${suffix}`,
+  );
+  expect(await keys("claims")).toEqual(claims);
+  expect(await keys("orphans")).toEqual([
     "agent:main:orphan-aborted",
     "agent:main:orphan-interrupted",
-    ...claimKeys,
+    ...claims,
   ]);
-  expect(await readSessionEntrySummariesInWorker(store)).toHaveLength(Object.keys(entries).length);
+  expect(await keys()).toHaveLength(Object.keys(entries).length);
 });
 
 test("pages exec owners without unrelated entries or saved prompts", async ({
@@ -263,11 +253,9 @@ test("skips an admitted store without optional pending-input storage", async ({
   closeOpenClawAgentDatabasesForTest();
   copyFileSync(database.path, `${database.path}.previous`);
   renameSync(`${database.path}.previous`, database.path);
-  const previous = new DatabaseSync(database.path);
-  try {
+  {
+    using previous = new DatabaseSync(database.path);
     previous.exec("DROP TABLE session_pending_inputs");
-  } finally {
-    previous.close();
   }
 
   openOpenClawAgentDatabase({ agentId: "main", env });
@@ -282,7 +270,7 @@ test("refreshes empty recovery reads with only recoverable inputs", async ({
     sessionKey: `agent:main:recovery-${name}`,
     sessionId: `recovery-${name}`,
   });
-  for (const name of [
+  const states = [
     "empty",
     "queued",
     "interrupted",
@@ -291,7 +279,8 @@ test("refreshes empty recovery reads with only recoverable inputs", async ({
     "consumed",
     "old",
     "ordinary",
-  ]) {
+  ];
+  for (const name of states) {
     const target = scope(name);
     writeSessionEntry(database, target.sessionKey, { sessionId: target.sessionId, updatedAt: 1 });
   }
