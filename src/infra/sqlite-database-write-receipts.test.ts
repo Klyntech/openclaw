@@ -72,8 +72,7 @@ it("publishes cohort scope discovery once and preserves independent write receip
     ["second", sqliteSessionIdWriteScope("second-id")],
   ];
   const before = receipts.readSqliteDatabaseScopedWriteTokensForPath(":memory:", scopes)!;
-  expect(before).toHaveLength(2);
-  expect(before.every((token) => typeof token === "string")).toBe(true);
+  expect(before.map((token) => typeof token)).toEqual(["string", "string"]);
   expect(publications).toEqual([4]);
   expect(receipts.readSqliteDatabaseScopedWriteTokensForPath(":memory:", scopes)).toEqual(before);
   expect(publications).toEqual([4]);
