@@ -57,7 +57,6 @@ export async function prepareCandidateAuthorityRuntime(root: string) {
   return {
     worker: resolveRuntimeWorkerUrl({ ...workerDeclaration, root: installedRoot }),
     cli: sibling("../entry", "entry.js"),
-    runtime: sibling("../runtime", "runtime.js"),
     doctorResult: sibling("update-doctor-result", "infra/update-doctor-result.js"),
     bundledPluginsDir: path.dirname(path.dirname(fileURLToPath(doctorHealth))),
   };
@@ -74,7 +73,7 @@ export function writeCandidateAuthorityEntrypoints(params: {
   boundary: "candidate" | "doctor";
 }): string {
   const workerPath = path.join(params.root, "dist", workerDeclaration.distWorkerPath);
-  const { worker: candidateAuthorityWorker, cli, runtime, doctorResult } = params.runtime;
+  const { worker: candidateAuthorityWorker, cli, doctorResult } = params.runtime;
   const bootstrap = `
     import fs from 'node:fs';
     import fsp from 'node:fs/promises';
@@ -113,24 +112,6 @@ export function writeCandidateAuthorityEntrypoints(params: {
   fs.writeFileSync(
     path.join(params.root, "dist", "index.js"),
     `${bootstrap}
-    const output={stdout:'',stderr:''};
-    for(const name of ['stdout','stderr']) {
-      const stream=process[name];
-      const write=stream.write.bind(stream);
-      stream.write=(chunk,...args)=>{output[name]+=String(chunk);return write(chunk,...args);};
-    }
-    process.on('exit',(code)=>event({event:'exit',code,...output}));
-    const {defaultRuntime}=await import(${JSON.stringify(runtime.href)});
-    const writeJson=defaultRuntime.writeJson;
-    defaultRuntime.writeJson=(value,...args)=>{
-      event({event:'runtime-json',value});
-      return writeJson(value,...args);
-    };
-    const error=defaultRuntime.error;
-    defaultRuntime.error=(...args)=>{
-      event({event:'runtime-error',args});
-      return error(...args);
-    };
     // Enter the actual executable bootstrap. Internal owners are bundled chunks,
     // not stable dist/cli or dist/state paths a package adapter may import.
     const {fileURLToPath}=await import('node:url');

@@ -187,34 +187,25 @@ it.each(["current", "pre-migration"] as const)(
       const doctors = [5, 4, 3, 2, 1].map((age) => {
         const runId = `doctor-${randomUUID()}`;
         const directory = writeCapture(root, runId, true);
-        fs.writeFileSync(
-          path.join(directory, "manifest.json"),
-          JSON.stringify({
-            schemaVersion: 2,
-            kind: "update-recovery",
-            generation: { kind: "baseline" },
-            databases: [],
-            runId,
-            installRoot: root,
-            stateDir: path.dirname(root),
-            configPath,
-            configPaths: [configPath],
-            creator: { host: "fixture", pid: 1, startIdentity: "1" },
-            drivers: [],
-            createdAt: new Date(now - age * 86_400_000).toISOString(),
-            roots: [configPath],
-            excludedRoots: [],
-            protectedPaths: [configPath],
-            entries: [
-              {
-                kind: "missing",
-                sourcePath: configPath,
-                sqlite: false,
-                directory: false,
-              },
-            ],
-          }),
-        );
+        const manifest = {
+          schemaVersion: 2,
+          kind: "update-recovery",
+          generation: { kind: "baseline" },
+          databases: [],
+          runId,
+          installRoot: root,
+          stateDir: path.dirname(root),
+          configPath,
+          configPaths: [configPath],
+          creator: { host: "fixture", pid: 1, startIdentity: "1" },
+          drivers: [],
+          createdAt: new Date(now - age * 86_400_000).toISOString(),
+          roots: [configPath],
+          excludedRoots: [],
+          protectedPaths: [configPath],
+          entries: [{ kind: "missing", sourcePath: configPath, sqlite: false, directory: false }],
+        };
+        fs.writeFileSync(path.join(directory, "manifest.json"), JSON.stringify(manifest));
         return directory;
       });
       const preview = await runCleanup({ dryRun: true });
@@ -227,13 +218,7 @@ it.each(["current", "pre-migration"] as const)(
         expect(fs.existsSync(directory)).toBe(true);
       }
       await runCleanup({ yes: true });
-      expect(doctors.map((directory) => fs.existsSync(directory))).toEqual([
-        false,
-        false,
-        true,
-        true,
-        true,
-      ]);
+      expect(doctors.map(fs.existsSync)).toEqual([false, false, true, true, true]);
     }, location);
   },
 );

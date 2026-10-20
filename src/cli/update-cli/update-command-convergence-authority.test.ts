@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as updateCheck from "../../infra/update-check.js";
 import { DoctorMaintenanceRefusalError } from "../../infra/update-doctor-result.js";
@@ -129,6 +129,11 @@ function converge({
 
 function doctorOperation(args: string[]) {
   return args.includes("--repair") ? "repair" : args.includes("--lint") ? "readiness" : "validate";
+}
+function expectCalls(count: number, ...spies: Mock[]) {
+  for (const spy of spies) {
+    expect(spy).toHaveBeenCalledTimes(count);
+  }
 }
 
 describe("candidate convergence Doctor dispatch authority", () => {
@@ -365,18 +370,16 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
       const rebuilt = runtime === "git-rebuilt";
       const version = rebuilt ? VERSION : "2026.9.4";
       vi.mocked(shared.readPackageVersion).mockResolvedValue(version);
-      const incompatibleWorker = new Error("Unknown shared-state SQLite command");
       const parentLease = vi
         .spyOn(pluginLifecycle, "withPluginLifecycleLease")
-        .mockRejectedValue(incompatibleWorker);
+        .mockRejectedValue(new Error("Unknown shared-state SQLite command"));
       const parentRuntime = vi.spyOn(sourceRuntime, "completeSourceUpdateRuntime");
       let current = true;
       const authorityRefusal = new Error("Update requester revoked after target convergence");
       const delegate = vi
         .spyOn(postCore, "continuePostCoreUpdateInFreshProcess")
-        .mockImplementationOnce(async ({ root, channel }) => {
-          expect(root).toBe("/isolated");
-          expect(channel).toBe("stable");
+        .mockImplementationOnce(async (params) => {
+          expect(params).toMatchObject({ root: "/isolated", channel: "stable" });
           current = !revoked;
           return { resumed: true, pluginUpdate: unchangedPluginUpdate() };
         });
@@ -411,9 +414,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         );
       }
       expect(delegate).toHaveBeenCalledOnce();
-      expect(parentLease).not.toHaveBeenCalled();
-      expect(parentRuntime).not.toHaveBeenCalled();
-      expect(mocks.convergeCandidate).not.toHaveBeenCalled();
+      expectCalls(0, parentLease, parentRuntime, mocks.convergeCandidate);
     },
   );
 
@@ -481,8 +482,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         });
         expect(result.detail).toContain("installed target executable");
         expect(events).toEqual(["target-declined-consent"]);
-        expect(runtime).not.toHaveBeenCalled();
-        expect(localPlugins).not.toHaveBeenCalled();
+        expectCalls(0, runtime, localPlugins);
       } else {
         expect(result.resultWithPostUpdate.status).toBe("ok");
         expect(events).toEqual(["target-declined-consent", "source-published", "local-plugins"]);
@@ -540,10 +540,8 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         beforeDoctor: park,
         assertCurrent,
       });
-      expect(runtime).toHaveBeenCalledOnce();
-      expect(mocks.convergeCandidate).toHaveBeenCalledOnce();
+      expectCalls(1, runtime, mocks.convergeCandidate, park);
       expect(delegate).not.toHaveBeenCalled();
-      expect(park).toHaveBeenCalledOnce();
       expect(events).toEqual(
         changed === "runtime"
           ? ["park", "publish", "candidate-plugins"]
@@ -576,102 +574,98 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
   );
 
   it.each([
-    "doctor-revocation",
-    "config-read-revocation",
-    "validation-replacement",
-    "entrypoint-first-refusal",
-    "maintenance-first-refusal",
-    "maintenance-deferred",
-    "maintenance-at-risk",
-  ] as const)("does not dispatch fresh Doctor with stale authority after %s", async (boundary) => {
-    const originalOwner = {};
-    let currentOwner: object | undefined = originalOwner;
-    const stale = new Error("original updater is no longer current");
-    const maintenanceRefusal = new DoctorMaintenanceRefusalError(
-      "Doctor could not enter maintenance; run openclaw doctor --fix after the current owner stops.",
-      boundary === "maintenance-at-risk"
-        ? { kind: "data-at-risk", reason: "incomplete-migration" }
-        : { kind: "deferred", reason: "coordinator-contention" },
-    );
-    let refusalArmed = false;
-    let refusedOnce = false;
-    const assertCurrent = () => {
-      if (refusalArmed && !refusedOnce) {
-        refusedOnce = true;
-        throw stale;
-      }
-      if (currentOwner !== originalOwner) {
-        throw stale;
-      }
-    };
-    if (boundary === "entrypoint-first-refusal") {
-      mocks.resolveEntrypoint.mockImplementationOnce(async () => {
-        await Promise.resolve();
-        refusalArmed = true;
-        return "/isolated/dist/index.js";
-      });
-    }
-    const dispatched: string[] = [];
-    mocks.runExec.mockImplementation(async (_command, args: string[]) => {
-      const operation = doctorOperation(args);
-      dispatched.push(operation);
-      await Promise.resolve();
-      if (boundary === "doctor-revocation" && operation === "repair") {
-        currentOwner = undefined;
-      }
-      if (boundary === "validation-replacement" && operation === "validate") {
-        currentOwner = {};
-      }
-      return doctorOutput(args);
-    });
-    if (boundary === "config-read-revocation") {
-      mocks.readConfig.mockImplementationOnce(async () => {
-        await Promise.resolve();
-        currentOwner = undefined;
-        return snapshot;
-      });
-    }
-    const outcome = converge({
-      candidateRuntime: true,
-      result: { mode: "npm" },
-      assertCurrent,
-      beforeDoctor: async () => {
-        await Promise.resolve();
-        if (boundary === "maintenance-deferred" || boundary === "maintenance-at-risk") {
-          throw maintenanceRefusal;
+    ["doctor-revocation", ["repair"]],
+    ["config-read-revocation", ["repair"]],
+    ["validation-replacement", ["repair", "validate"]],
+    ["entrypoint-first-refusal", []],
+    ["maintenance-first-refusal", []],
+    ["maintenance-deferred", []],
+    ["maintenance-at-risk", []],
+  ] as const)(
+    "does not dispatch fresh Doctor with stale authority after %s",
+    async (boundary, allowed) => {
+      const originalOwner = {};
+      let currentOwner: object | undefined = originalOwner;
+      const stale = new Error("original updater is no longer current");
+      const maintenanceRefusal = new DoctorMaintenanceRefusalError(
+        "Doctor could not enter maintenance; run openclaw doctor --fix after the current owner stops.",
+        boundary === "maintenance-at-risk"
+          ? { kind: "data-at-risk", reason: "incomplete-migration" }
+          : { kind: "deferred", reason: "coordinator-contention" },
+      );
+      let refuseNextCheck = false;
+      const assertCurrent = () => {
+        if (refuseNextCheck) {
+          refuseNextCheck = false;
+          throw stale;
         }
-        if (boundary === "maintenance-first-refusal") {
-          refusalArmed = true;
+        if (currentOwner !== originalOwner) {
+          throw stale;
         }
-      },
-    });
-    if (boundary === "maintenance-deferred") {
-      const completed = await outcome;
-      expect(completed.resultWithPostUpdate).toMatchObject({
-        status: "ok",
-        postUpdate: { plugins: { status: "warning", changed: true } },
-        steps: [
-          expect.objectContaining({
-            exitCode: 0,
-            advisory: { kind: "package-post-install-doctor", message: maintenanceRefusal.message },
-          }),
-        ],
+      };
+      if (boundary === "entrypoint-first-refusal") {
+        mocks.resolveEntrypoint.mockImplementationOnce(async () => {
+          await Promise.resolve();
+          refuseNextCheck = true;
+          return "/isolated/dist/index.js";
+        });
+      }
+      const dispatched: string[] = [];
+      mocks.runExec.mockImplementation(async (_command, args: string[]) => {
+        const operation = doctorOperation(args);
+        dispatched.push(operation);
+        await Promise.resolve();
+        if (boundary === "doctor-revocation" && operation === "repair") {
+          currentOwner = undefined;
+        }
+        if (boundary === "validation-replacement" && operation === "validate") {
+          currentOwner = {};
+        }
+        return doctorOutput(args);
       });
-      expect(dispatched).toEqual([]);
-      expect(mocks.readConfig).not.toHaveBeenCalled();
-    } else if (boundary === "maintenance-at-risk") {
-      await expect(outcome).rejects.toBe(maintenanceRefusal);
-      expect(dispatched).toEqual([]);
-    } else {
-      await expect(outcome).rejects.toBe(stale);
-      // The terminal caller check is too late if the mutating child was dispatched.
-      const allowed =
-        boundary === "validation-replacement"
-          ? ["repair", "validate"]
-          : boundary === "doctor-revocation" || boundary === "config-read-revocation"
-            ? ["repair"]
-            : [];
+      if (boundary === "config-read-revocation") {
+        mocks.readConfig.mockImplementationOnce(async () => {
+          await Promise.resolve();
+          currentOwner = undefined;
+          return snapshot;
+        });
+      }
+      const outcome = converge({
+        candidateRuntime: true,
+        result: { mode: "npm" },
+        assertCurrent,
+        beforeDoctor: async () => {
+          await Promise.resolve();
+          if (boundary === "maintenance-deferred" || boundary === "maintenance-at-risk") {
+            throw maintenanceRefusal;
+          }
+          if (boundary === "maintenance-first-refusal") {
+            refuseNextCheck = true;
+          }
+        },
+      });
+      if (boundary === "maintenance-deferred") {
+        const completed = await outcome;
+        expect(completed.resultWithPostUpdate).toMatchObject({
+          status: "ok",
+          postUpdate: { plugins: { status: "warning", changed: true } },
+          steps: [
+            expect.objectContaining({
+              exitCode: 0,
+              advisory: {
+                kind: "package-post-install-doctor",
+                message: maintenanceRefusal.message,
+              },
+            }),
+          ],
+        });
+        expect(mocks.readConfig).not.toHaveBeenCalled();
+      } else {
+        await expect(outcome).rejects.toBe(
+          boundary === "maintenance-at-risk" ? maintenanceRefusal : stale,
+        );
+      }
       expect(dispatched).toEqual(allowed);
-    }
-  });
+    },
+  );
 });
