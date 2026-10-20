@@ -261,30 +261,23 @@ it("routes every focus-surface and key-class pair by the shared contract", async
     expected: readonly Destination[],
     overlay?: "menu" | "dialog",
   ];
-  const append = <K extends keyof HTMLElementTagNameMap>(
-    tag: K,
-    props: Partial<HTMLElementTagNameMap[K]> = {},
-    parent: HTMLElement = page,
-  ) => parent.appendChild(Object.assign(document.createElement(tag), props));
-  const main = append("main", { tabIndex: -1 });
-  const button = append("button");
-  const link = append("a", { href: "#target" });
-  const menu = append("div", { popover: "manual" });
-  menu.setAttribute("role", "menu");
+  const surfaces = page.appendChild(document.createElement("section"));
+  surfaces.innerHTML = `
+    <main tabindex="-1"></main><button></button><a href="#target"></a>
+    <div role="menu" popover="manual"><button role="menuitemradio" tabindex="-1"></button></div>
+    <dialog><button></button></dialog><details open><summary></summary></details>
+    <input><div contenteditable="true" tabindex="0"></div>`;
+  const get = <T extends HTMLElement = HTMLElement>(selector: string) =>
+    expectDefined(surfaces.querySelector<T>(selector), selector);
+  const main = get("main");
+  const menu = get('[role="menu"]');
   const menuOwner = createOverlay("new-session-routing-test", undefined, {
     dismissOutsideFocus: false,
   });
   menuOwner.bindSurface(menu);
-  const menuItem = append("button", { tabIndex: -1 }, menu);
-  menuItem.setAttribute("role", "menuitemradio");
-  const dialog = append("dialog");
+  const dialog = get<HTMLDialogElement>("dialog");
   const releaseDialog = registerModalSurface(dialog);
   dialog.open = true;
-  const dialogButton = append("button", {}, dialog);
-  const summary = append("summary", {}, append("details", { open: true }));
-  const input = append("input");
-  const editable = append("div", { tabIndex: 0 });
-  editable.setAttribute("contenteditable", "true");
   const element = ["element", "element", "element", "element", "element"] as const;
   const overlay = ["overlay", "overlay", "overlay", "overlay", "overlay"] as const;
   const typingOnly = ["composer", "element", "element", "nothing", "nothing"] as const;
@@ -292,12 +285,12 @@ it("routes every focus-surface and key-class pair by the shared contract", async
   const routing: Surface[] = [
     ["main", [main], ["composer", "composer", "nothing", "nothing", "nothing"]],
     ["composer", [textarea], element],
-    ["button/link", [button, link], typingOnly],
-    ["menuitem", [menuItem], menuKeys, "menu"],
+    ["button/link", [get(":scope > button"), get("a")], typingOnly],
+    ["menuitem", [get('[role="menuitemradio"]')], menuKeys, "menu"],
     ["open native menu", [main], menuKeys, "menu"],
-    ["dialog", [dialogButton], overlay, "dialog"],
-    ["details/summary", [summary], typingOnly],
-    ["input/contenteditable", [input, editable], element],
+    ["dialog", [get("dialog button")], overlay, "dialog"],
+    ["details/summary", [get("summary")], typingOnly],
+    ["input/contenteditable", [get("input"), get("[contenteditable]")], element],
   ];
 
   try {
