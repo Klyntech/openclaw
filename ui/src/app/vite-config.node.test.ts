@@ -58,15 +58,28 @@ vi.mock("vite", async (importOriginal) => {
 });
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const baseLocaleId = "\0virtual:openclaw-control-ui-locale/fr";
+const resolveBuildInfo = (sources: Parameters<typeof resolveControlUiBuildInfo>[0] = {}) =>
+  resolveControlUiBuildInfo({
+    env: {},
+    readGitCommit: () => null,
+    readGitBranch: () => null,
+    readGitDirty: () => null,
+    readPackageVersion: () => null,
+    ...sources,
+  });
 
 function findStringAlias(key: string) {
   return resolveTsconfigPathAliasesForVite().find((alias) => alias.find === key);
 }
 
+function hook<T extends (...args: never[]) => unknown>(value: T | { handler: T } | undefined) {
+  return typeof value === "function" ? value : value?.handler;
+}
+
 function controlUiLocaleModuleHooks(aliases: Alias[] = []) {
   const plugin = controlUiLocaleModulesPlugin();
-  const configHook = plugin.configResolved;
-  const configResolved = typeof configHook === "function" ? configHook : configHook?.handler;
+  const configResolved = hook(plugin.configResolved);
   expect(
     configResolved?.call(
       {} as never,
@@ -81,25 +94,19 @@ function controlUiLocaleModuleHooks(aliases: Alias[] = []) {
       } as never,
     ),
   ).toBeUndefined();
-  const resolveHook = plugin.resolveId;
-  const resolveId = typeof resolveHook === "function" ? resolveHook : resolveHook?.handler;
-  const loadHook = plugin.load;
-  const load = typeof loadHook === "function" ? loadHook : loadHook?.handler;
-  const watchChangeHook = plugin.watchChange;
-  const watchChange =
-    typeof watchChangeHook === "function" ? watchChangeHook : watchChangeHook?.handler;
-  const buildStartHook = plugin.buildStart;
-  const buildStart =
-    typeof buildStartHook === "function" ? buildStartHook : buildStartHook?.handler;
+  const resolveId = hook(plugin.resolveId);
+  const load = hook(plugin.load);
+  const watchChange = hook(plugin.watchChange);
+  const buildStart = hook(plugin.buildStart);
   if (!resolveId || !load || !watchChange || !buildStart) {
     throw new Error("Expected locale module resolver, loader, and invalidation hooks");
   }
   return { buildStart, resolveId, load, watchChange };
 }
 
-async function loadControlUiLocaleModuleSource(
+async function loadLocaleSource(
   load: ReturnType<typeof controlUiLocaleModuleHooks>["load"],
-  id: string,
+  id: string = baseLocaleId,
   addWatchFile: (path: string) => void = vi.fn(),
 ) {
   const result = await load.call({ addWatchFile } as never, id, {} as never);
@@ -108,6 +115,38 @@ async function loadControlUiLocaleModuleSource(
   }
   return result;
 }
+
+function catalogImport(
+  catalog: TranslationMap & { common: TranslationMap },
+  startup: TranslationMap = { common: catalog.common },
+) {
+  return {
+    module: {
+      loadControlUiSourceCatalog: () => catalog,
+      loadControlUiStartupCatalog: () => startup,
+    },
+    dependencies: [],
+  };
+}
+
+function memoryEntry(
+  cache_key: string,
+  segment_id: string,
+  text: string,
+  translated: string,
+  hint = false,
+) {
+  return {
+    cache_key,
+    segment_id,
+    ...(hint ? { text } : {}),
+    text_hash: hashControlUiTranslationText(text),
+    translated,
+  };
+}
+
+const watchedPaths = (addWatchFile: ReturnType<typeof vi.fn>) =>
+  addWatchFile.mock.calls.map(([file]) => path.normalize(file));
 
 function dataModuleUrl(source: string): string {
   return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
@@ -131,7 +170,7 @@ async function executeControlUiLocaleModule(
       ? "configHints"
       : specifier.split("/").at(-1)!;
     namespaces.push(namespace);
-    const source = await loadControlUiLocaleModuleSource(load, `\0${specifier}`);
+    const source = await loadLocaleSource(load, `\0${specifier}`);
     executableSource = executableSource.replace(
       JSON.stringify(specifier),
       JSON.stringify(dataModuleUrl(source)),
@@ -210,15 +249,13 @@ describe("Control UI Vite config", () => {
     const readGitCommit = vi.fn(() => "f".repeat(40));
     const readGitCommitTimestamp = vi.fn(() => "2026-07-10T10:11:12.000Z");
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: {
           GIT_COMMIT: "0123456789abcdef0123456789abcdef01234567",
           OPENCLAW_BUILD_TIMESTAMP: "2026-07-10T12:34:56Z",
         },
         readGitCommit,
         readGitCommitTimestamp,
-        readGitBranch: () => null,
-        readGitDirty: () => null,
         readPackageVersion: () => "2026.7.10",
       }),
     ).toEqual({
@@ -240,12 +277,9 @@ describe("Control UI Vite config", () => {
       env: {},
       readGitCommit: () => "a".repeat(40),
       readGitCommitTimestamp: () => null,
-      readGitBranch: () => null,
-      readGitDirty: () => null,
-      readPackageVersion: () => null,
     };
-    const first = resolveControlUiBuildInfo(sources);
-    const second = resolveControlUiBuildInfo(sources);
+    const first = resolveBuildInfo(sources);
+    const second = resolveBuildInfo(sources);
 
     expect(first).toEqual(second);
     expect(first).toEqual({
@@ -279,10 +313,7 @@ describe("Control UI Vite config", () => {
         childProcessMocks.execFileSync.mockClear();
 
         expect(
-          resolveControlUiBuildInfo({
-            env: {},
-            readPackageVersion: () => null,
-          }),
+          resolveControlUiBuildInfo({ env: {}, readPackageVersion: () => null }),
         ).toMatchObject({
           commit: "a".repeat(40),
           commitAt: "1970-01-01T00:00:00.000Z",
@@ -305,7 +336,7 @@ describe("Control UI Vite config", () => {
 
   it("records release packaging as an explicit artifact fact", () => {
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: {
           OPENCLAW_CONTROL_UI_RELEASE_BUILD: "1",
           OPENCLAW_BUILD_TIMESTAMP: "2026-07-10T13:14:15.000Z",
@@ -328,11 +359,8 @@ describe("Control UI Vite config", () => {
 
   it("rejects malformed release-build identity", () => {
     expect(() =>
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { OPENCLAW_CONTROL_UI_RELEASE_BUILD: "true" },
-        readGitCommit: () => null,
-        readGitBranch: () => null,
-        readGitDirty: () => null,
         readPackageVersion: () => "2026.7.10",
       }),
     ).toThrow("OPENCLAW_CONTROL_UI_RELEASE_BUILD must be 1 when set");
@@ -341,42 +369,24 @@ describe("Control UI Vite config", () => {
   it("uses checked-out Git instead of unverified GitHub workflow context", () => {
     const readGitCommit = vi.fn(() => "c".repeat(40));
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { GITHUB_SHA: "b".repeat(40) },
         readGitCommit,
-        readGitBranch: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
       }),
     ).toMatchObject({ commit: "c".repeat(40), commitAt: null });
     expect(readGitCommit).toHaveBeenCalledOnce();
-    expect(
-      resolveControlUiBuildInfo({
-        env: { GITHUB_SHA: "b".repeat(40) },
-        readGitCommit: () => null,
-        readGitBranch: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
-      }).commit,
-    ).toBe("b".repeat(40));
-    expect(() =>
-      resolveControlUiBuildInfo({
-        env: { GITHUB_SHA: "bad" },
-        readGitCommit: () => null,
-        readPackageVersion: () => null,
-      }),
-    ).toThrow("GITHUB_SHA must be a full 40-character hexadecimal SHA");
+    expect(resolveBuildInfo({ env: { GITHUB_SHA: "b".repeat(40) } }).commit).toBe("b".repeat(40));
+    expect(() => resolveBuildInfo({ env: { GITHUB_SHA: "bad" } })).toThrow(
+      "GITHUB_SHA must be a full 40-character hexadecimal SHA",
+    );
   });
 
   it("uses explicit commit aliases before reading Git", () => {
     const readGitCommit = vi.fn(() => "c".repeat(40));
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { GIT_SHA: "A".repeat(40), GITHUB_SHA: "b".repeat(40) },
         readGitCommit,
-        readGitBranch: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
       }).commit,
     ).toBe("a".repeat(40));
     expect(readGitCommit).not.toHaveBeenCalled();
@@ -385,16 +395,13 @@ describe("Control UI Vite config", () => {
   it("prefers GIT_BRANCH over GitHub and checked-out Git branch identity", () => {
     const readGitBranch = vi.fn(() => "git-fallback");
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: {
           GIT_BRANCH: " feature/from-env ",
           GITHUB_REF_NAME: "feature/from-github",
           GITHUB_REF_TYPE: "branch",
         },
         readGitBranch,
-        readGitCommit: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
       }).branch,
     ).toBe("feature/from-env");
     expect(readGitBranch).not.toHaveBeenCalled();
@@ -403,57 +410,31 @@ describe("Control UI Vite config", () => {
   it("uses GITHUB_REF_NAME only for branch refs", () => {
     const readGitBranch = vi.fn(() => "git-fallback");
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { GITHUB_REF_NAME: "feature/github", GITHUB_REF_TYPE: "branch" },
         readGitBranch,
-        readGitCommit: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
       }).branch,
     ).toBe("feature/github");
     expect(readGitBranch).not.toHaveBeenCalled();
 
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { GITHUB_REF_NAME: "v2026.7.10", GITHUB_REF_TYPE: "tag" },
         readGitBranch,
-        readGitCommit: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
       }).branch,
     ).toBe("git-fallback");
   });
 
   it("falls back to checked-out Git and treats detached HEAD as unknown", () => {
-    expect(
-      resolveControlUiBuildInfo({
-        env: {},
-        readGitBranch: () => "feature/from-git",
-        readGitCommit: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
-      }).branch,
-    ).toBe("feature/from-git");
-    expect(
-      resolveControlUiBuildInfo({
-        env: {},
-        readGitBranch: () => "HEAD",
-        readGitCommit: () => null,
-        readGitDirty: () => null,
-        readPackageVersion: () => null,
-      }).branch,
-    ).toBeNull();
+    expect(resolveBuildInfo({ readGitBranch: () => "feature/from-git" }).branch).toBe(
+      "feature/from-git",
+    );
+    expect(resolveBuildInfo({ readGitBranch: () => "HEAD" }).branch).toBeNull();
   });
 
   it("captures clean, dirty, and unavailable Git worktree state", () => {
     const resolveDirty = (readGitDirty: () => boolean | null) =>
-      resolveControlUiBuildInfo({
-        env: {},
-        readGitBranch: () => null,
-        readGitCommit: () => null,
-        readGitDirty,
-        readPackageVersion: () => null,
-      }).dirty;
+      resolveBuildInfo({ readGitDirty }).dirty;
 
     expect(resolveDirty(() => true)).toBe(true);
     expect(resolveDirty(() => false)).toBe(false);
@@ -462,14 +443,12 @@ describe("Control UI Vite config", () => {
 
   it("does not let a generic release selector replace the artifact build identity", () => {
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: {
           OPENCLAW_VERSION: "latest",
           OPENCLAW_BUILD_TIMESTAMP: "2026-07-10T13:14:15.000Z",
         },
         readGitCommit: () => "a".repeat(40),
-        readGitBranch: () => null,
-        readGitDirty: () => null,
         readPackageVersion: () => "2026.7.10",
       }).buildId,
     ).toBe("2026.7.10-aaaaaaaaaaaa-2026-07-10T13-14-15.000Z");
@@ -477,14 +456,12 @@ describe("Control UI Vite config", () => {
 
   it("ignores a whitespace-only explicit build id", () => {
     expect(
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: {
           OPENCLAW_CONTROL_UI_BUILD_ID: "   ",
           OPENCLAW_BUILD_TIMESTAMP: "2026-07-10T13:14:15.000Z",
         },
         readGitCommit: () => "a".repeat(40),
-        readGitBranch: () => null,
-        readGitDirty: () => null,
         readPackageVersion: () => "2026.7.10",
       }).buildId,
     ).toBe("2026.7.10-aaaaaaaaaaaa-2026-07-10T13-14-15.000Z");
@@ -493,7 +470,7 @@ describe("Control UI Vite config", () => {
   it("fails closed for nonempty invalid explicit build inputs", () => {
     const readGitCommit = vi.fn(() => "a".repeat(40));
     expect(() =>
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { GIT_COMMIT: "deadbeef" },
         readGitCommit,
         readPackageVersion: () => "2026.7.10",
@@ -502,7 +479,7 @@ describe("Control UI Vite config", () => {
     expect(readGitCommit).not.toHaveBeenCalled();
 
     expect(() =>
-      resolveControlUiBuildInfo({
+      resolveBuildInfo({
         env: { OPENCLAW_BUILD_TIMESTAMP: "2026-07-10 12:34:56" },
         readGitCommit: () => "a".repeat(40),
         readPackageVersion: () => "2026.7.10",
@@ -518,58 +495,26 @@ describe("Control UI Vite config", () => {
 
   it("resolves Control UI dev-server source aliases for internal packages", () => {
     const aliases = resolveSourcePackageAliasesForVite();
-    expect(
-      aliases.find((alias) => alias.find === "@openclaw/normalization-core/agent-id"),
-    )?.toEqual({
-      find: "@openclaw/normalization-core/agent-id",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/agent-id.ts"),
-    });
-    expect(
-      aliases.find((alias) => alias.find === "@openclaw/normalization-core/json-schema"),
-    )?.toEqual({
-      find: "@openclaw/normalization-core/json-schema",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/json-schema.ts"),
-    });
-    expect(
-      aliases.find((alias) => alias.find === "@openclaw/normalization-core/string-coerce"),
-    )?.toEqual({
-      find: "@openclaw/normalization-core/string-coerce",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/string-coerce.ts"),
-    });
-    expect(
-      aliases.find((alias) => alias.find === "@openclaw/normalization-core/phone-presentation"),
-    )?.toEqual({
-      find: "@openclaw/normalization-core/phone-presentation",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/phone-presentation.ts"),
-    });
-    const resultAliasIndex = aliases.findIndex(
-      (alias) => alias.find === "@openclaw/normalization-core/result",
-    );
-    const stableStringifyAliasIndex = aliases.findIndex(
-      (alias) => alias.find === "@openclaw/normalization-core/stable-stringify",
-    );
-    const rootAliasIndex = aliases.findIndex(
-      (alias) => alias.find === "@openclaw/normalization-core",
-    );
-    const comparisonAliasIndex = aliases.findIndex(
-      (alias) => alias.find === "@openclaw/normalization-core/session-key-comparison",
-    );
-    expect(aliases[comparisonAliasIndex]).toEqual({
-      find: "@openclaw/normalization-core/session-key-comparison",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/session-key-comparison.ts"),
-    });
-    expect(comparisonAliasIndex).toBeLessThan(rootAliasIndex);
-    expect(aliases[resultAliasIndex]).toEqual({
-      find: "@openclaw/normalization-core/result",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/result.ts"),
-    });
-    expect(aliases[stableStringifyAliasIndex]).toEqual({
-      find: "@openclaw/normalization-core/stable-stringify",
-      replacement: path.join(repoRoot, "packages/normalization-core/src/stable-stringify.ts"),
-    });
-    expect(resultAliasIndex).toBeGreaterThanOrEqual(0);
-    expect(stableStringifyAliasIndex).toBeGreaterThanOrEqual(0);
-    expect(rootAliasIndex).toBeGreaterThan(stableStringifyAliasIndex);
+    const rootIndex = aliases.findIndex((alias) => alias.find === "@openclaw/normalization-core");
+    for (const subpath of [
+      "agent-id",
+      "json-schema",
+      "string-coerce",
+      "phone-presentation",
+      "session-key-comparison",
+      "result",
+      "stable-stringify",
+    ]) {
+      const index = aliases.findIndex(
+        (alias) => alias.find === `@openclaw/normalization-core/${subpath}`,
+      );
+      expect(aliases[index]).toEqual({
+        find: `@openclaw/normalization-core/${subpath}`,
+        replacement: path.join(repoRoot, `packages/normalization-core/src/${subpath}.ts`),
+      });
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(index).toBeLessThan(rootIndex);
+    }
   });
 
   it("uses Node package resolution for external packages inherited by worktrees", () => {
@@ -669,11 +614,7 @@ describe("Control UI Vite config", () => {
     ).toBeNull();
 
     const addWatchFile = vi.fn();
-    const baseSource = await loadControlUiLocaleModuleSource(
-      load,
-      resolvedBase as string,
-      addWatchFile,
-    );
+    const baseSource = await loadLocaleSource(load, resolvedBase as string, addWatchFile);
     const { catalog, loadNamespace } = await executeControlUiLocaleModule(load, baseSource, true);
     expect(flattenTranslations(catalog).has("activity.title")).toBe(false);
     expect(catalog.configHints).toBeUndefined();
@@ -695,7 +636,7 @@ describe("Control UI Vite config", () => {
     await loadNamespace("configHints");
     expect(catalog.configHints).toBeTypeOf("object");
     expect(addWatchFile).toHaveBeenCalledWith(memoryPath);
-    const watchedFiles = addWatchFile.mock.calls.map(([file]) => path.normalize(file));
+    const watchedFiles = watchedPaths(addWatchFile);
     for (const source of [
       "scripts/lib/control-ui-i18n-catalog.ts",
       "ui/src/i18n/locales/en-activity.ts",
@@ -710,13 +651,13 @@ describe("Control UI Vite config", () => {
 
   it("bootstraps only an absent locale memory from the English catalog", async () => {
     const { load } = controlUiLocaleModuleHooks();
-    const baseId = "\0virtual:openclaw-control-ui-locale/fr";
+    const baseId = baseLocaleId;
     const addWatchFile = vi.fn();
 
     await fsMocks.existsSync.withImplementation(
       () => false,
       async () => {
-        const baseSource = await loadControlUiLocaleModuleSource(load, baseId, addWatchFile);
+        const baseSource = await loadLocaleSource(load, baseId, addWatchFile);
         const { catalog, loadAll } = await executeControlUiLocaleModule(load, baseSource, true);
         expect(flattenTranslations(catalog).has("activity.title")).toBe(false);
         expect(catalog.configHints).toBeUndefined();
@@ -724,7 +665,7 @@ describe("Control UI Vite config", () => {
         expect(flattenTranslations(catalog)).toEqual(
           flattenTranslations(loadControlUiSourceCatalog()),
         );
-        expect(addWatchFile.mock.calls.map(([file]) => path.normalize(file))).toContain(
+        expect(watchedPaths(addWatchFile)).toContain(
           path.join(repoRoot, "src/config/schema.hints.ts"),
         );
       },
@@ -743,9 +684,7 @@ describe("Control UI Vite config", () => {
     await fsMocks.readFileSync.withImplementation(
       () => memory,
       async () => {
-        await expect(
-          loadControlUiLocaleModuleSource(load, "\0virtual:openclaw-control-ui-locale/fr", vi.fn()),
-        ).rejects.toThrow(expected);
+        await expect(loadLocaleSource(load, baseLocaleId, vi.fn())).rejects.toThrow(expected);
       },
     );
   });
@@ -768,15 +707,7 @@ describe("Control UI Vite config", () => {
     };
     let imports = 0;
     const sourceImport = vi.fn(async () =>
-      imports++ === 0
-        ? staleImport.promise
-        : {
-            module: {
-              loadControlUiSourceCatalog: () => currentCatalog,
-              loadControlUiStartupCatalog: () => ({ common: currentCatalog.common }),
-            },
-            dependencies: [],
-          },
+      imports++ === 0 ? staleImport.promise : catalogImport(currentCatalog),
     );
 
     await fsMocks.existsSync.withImplementation(
@@ -784,34 +715,24 @@ describe("Control UI Vite config", () => {
       async () => {
         await viteMocks.runnerImport.withImplementation(sourceImport, async () => {
           const { load, watchChange } = controlUiLocaleModuleHooks();
-          let baseSourcePromise = loadControlUiLocaleModuleSource(
-            load,
-            "\0virtual:openclaw-control-ui-locale/fr",
-          );
+          let baseSourcePromise = loadLocaleSource(load);
           await vi.waitFor(() => expect(sourceImport).toHaveBeenCalledOnce());
           if (invalidate) {
             await watchChange.call({} as never, "src/config/schema.hints.ts", {} as never);
           }
           if (outcome === "resolve") {
-            staleImport.resolve({
-              module: {
-                loadControlUiSourceCatalog: () => ({
-                  common: { health: "stale health" },
-                  configHints: { gateway: { auth: { token: { label: "stale token" } } } },
-                }),
-                loadControlUiStartupCatalog: () => ({ common: { health: "stale health" } }),
-              },
-              dependencies: [],
-            });
+            staleImport.resolve(
+              catalogImport({
+                common: { health: "stale health" },
+                configHints: { gateway: { auth: { token: { label: "stale token" } } } },
+              }),
+            );
           } else {
             const error = new Error("source import failed");
             staleImport.reject(error);
             if (!invalidate) {
               await expect(baseSourcePromise).rejects.toBe(error);
-              baseSourcePromise = loadControlUiLocaleModuleSource(
-                load,
-                "\0virtual:openclaw-control-ui-locale/fr",
-              );
+              baseSourcePromise = loadLocaleSource(load);
             }
           }
           const baseSource = await baseSourcePromise;
@@ -855,20 +776,14 @@ describe("Control UI Vite config", () => {
               ]);
               const addWatchFile = vi.fn();
               const readCatalog = async () => {
-                const base = await loadControlUiLocaleModuleSource(
-                  load,
-                  "\0virtual:openclaw-control-ui-locale/fr",
-                  addWatchFile,
-                );
+                const base = await loadLocaleSource(load, baseLocaleId, addWatchFile);
                 return (await executeControlUiLocaleModule(load, base)).catalog;
               };
               expect(await readCatalog()).toEqual({
                 common: { health: "first" },
                 configHints: { fixture: { label: "first" } },
               });
-              expect(addWatchFile.mock.calls.map(([file]) => path.normalize(file))).toContain(
-                dependency,
-              );
+              expect(watchedPaths(addWatchFile)).toContain(dependency);
               await writeFile(dependency, 'export const label = "second";\n');
               await watchChange.call({} as never, dependency, {} as never);
               expect(await readCatalog()).toEqual({
@@ -895,27 +810,15 @@ describe("Control UI Vite config", () => {
       () => false,
       async () => {
         await viteMocks.runnerImport.withImplementation(
-          async () => ({
-            module: {
-              loadControlUiSourceCatalog: () => catalogs[imports++],
-              loadControlUiStartupCatalog: () => ({ common: { health: "health" } }),
-            },
-            dependencies: [],
-          }),
+          async () => catalogImport(catalogs[imports++]!, { common: { health: "health" } }),
           async () => {
             const { buildStart, load } = controlUiLocaleModuleHooks();
-            const firstBase = await loadControlUiLocaleModuleSource(
-              load,
-              "\0virtual:openclaw-control-ui-locale/fr",
-            );
+            const firstBase = await loadLocaleSource(load);
             const first = await executeControlUiLocaleModule(load, firstBase);
             expect(first.catalog).toEqual(catalogs[0]);
 
             await buildStart.call({} as never, {} as never);
-            const secondBase = await loadControlUiLocaleModuleSource(
-              load,
-              "\0virtual:openclaw-control-ui-locale/fr",
-            );
+            const secondBase = await loadLocaleSource(load);
             const second = await executeControlUiLocaleModule(load, secondBase);
             expect(second.catalog).toEqual(catalogs[1]);
           },
@@ -931,32 +834,10 @@ describe("Control UI Vite config", () => {
     const staleHintText = "Old Gateway Token";
     const staleHintKey = configHintTranslationKey("gateway.auth.token", "label", staleHintText);
     const memory = [
-      {
-        cache_key: "current",
-        segment_id: "configView.chatPrefs.title",
-        text_hash: hashControlUiTranslationText("Chat"),
-        translated: "Discussion",
-      },
-      {
-        cache_key: "stale",
-        segment_id: "updates.page.intro",
-        text_hash: hashControlUiTranslationText("Retired update introduction"),
-        translated: "Obsolete",
-      },
-      {
-        cache_key: "current-hint",
-        segment_id: currentHintKey,
-        text: currentHintText,
-        text_hash: hashControlUiTranslationText(currentHintText),
-        translated: "Ağ geçidi belirteci",
-      },
-      {
-        cache_key: "stale-hint",
-        segment_id: staleHintKey,
-        text: staleHintText,
-        text_hash: hashControlUiTranslationText(staleHintText),
-        translated: "Eski ağ geçidi belirteci",
-      },
+      memoryEntry("current", "configView.chatPrefs.title", "Chat", "Discussion"),
+      memoryEntry("stale", "updates.page.intro", "Retired update introduction", "Obsolete"),
+      memoryEntry("current-hint", currentHintKey, currentHintText, "Ağ geçidi belirteci", true),
+      memoryEntry("stale-hint", staleHintKey, staleHintText, "Eski ağ geçidi belirteci", true),
     ]
       .map((entry) => JSON.stringify(entry))
       .join("\n");
@@ -967,10 +848,7 @@ describe("Control UI Vite config", () => {
         await fsMocks.readFileSync.withImplementation(
           () => memory,
           async () => {
-            const baseSource = await loadControlUiLocaleModuleSource(
-              load,
-              "\0virtual:openclaw-control-ui-locale/fr",
-            );
+            const baseSource = await loadLocaleSource(load);
             const { catalog } = await executeControlUiLocaleModule(load, baseSource);
             const flat = flattenTranslations(catalog);
             expect(flat.get("configView.chatPrefs.title")).toBe("Discussion");
