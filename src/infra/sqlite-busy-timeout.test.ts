@@ -14,98 +14,92 @@ import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 afterEach(() => vi.restoreAllMocks());
-const timeoutOf = (database: DatabaseSync) => database.prepare("PRAGMA busy_timeout").get();
+const timeoutOf = (db: DatabaseSync) => db.prepare("PRAGMA busy_timeout").get();
 const suppress = { lockFailureReporting: "suppress" } as const;
 
-it("adopts an omitted constructor timeout and restores it after success and failure", () => {
-  using database = openNodeSqliteDatabase(":memory:");
-  database.exec("PRAGMA busy_timeout = 5000");
-
-  expect(withTimeout(database, 0, () => timeoutOf(database))).toEqual({ timeout: 0 });
-  expect(timeoutOf(database)).toEqual({ timeout: 5000 });
-
+it.each([
+  [undefined, 5000, 0],
+  [-1, 0, 25],
+  [0, 0, 25],
+  [37, 37, 25],
+] as const)("restores constructor policy %s", (timeout, initial, temporary) => {
+  using db = openNodeSqliteDatabase(":memory:", timeout === undefined ? undefined : { timeout });
+  if (timeout === undefined) {
+    db.exec("PRAGMA busy_timeout = 5000");
+  } else {
+    const prepare = vi.spyOn(db, "prepare"),
+      exec = vi.spyOn(db, "exec");
+    expect(readTimeout(db)).toBe(initial);
+    writeTimeout(db, initial);
+    expect([prepare.mock.calls, exec.mock.calls]).toEqual([[], []]);
+    prepare.mockRestore();
+    exec.mockRestore();
+    expect(timeoutOf(db)).toEqual({ timeout: initial });
+  }
+  expect(withTimeout(db, temporary, () => timeoutOf(db))).toEqual({
+    timeout: temporary,
+  });
+  expect(timeoutOf(db)).toEqual({ timeout: initial });
   expect(() =>
-    withTimeout(database, 25, () => {
+    withTimeout(db, 25, () => {
       throw new Error("operation failed");
     }),
   ).toThrow("operation failed");
-  expect(timeoutOf(database)).toEqual({ timeout: 5000 });
-});
-
-it.each([
-  [-1, 0],
-  [0, 0],
-  [37, 37],
-])("retains explicit constructor timeout %s as %s without SQL", (timeout, expected) => {
-  using database = openNodeSqliteDatabase(":memory:", { timeout });
-  const prepare = vi.spyOn(database, "prepare");
-  const exec = vi.spyOn(database, "exec");
-  expect(readTimeout(database)).toBe(expected);
-  writeTimeout(database, expected);
-  expect([prepare.mock.calls, exec.mock.calls]).toEqual([[], []]);
-  prepare.mockRestore();
-  exec.mockRestore();
-  expect(timeoutOf(database)).toEqual({ timeout: expected });
-  withTimeout(database, 25, () => {
-    expect(timeoutOf(database)).toEqual({ timeout: 25 });
-  });
-  expect(timeoutOf(database)).toEqual({ timeout: expected });
+  expect(timeoutOf(db)).toEqual({ timeout: initial });
 });
 
 it("restores timeout and lock reporting before the admitted operation finishes", () => {
-  using database = new DatabaseSync(":memory:");
-  database.exec("PRAGMA busy_timeout = 5000");
-  const exec = vi.spyOn(database, "exec");
+  using db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA busy_timeout = 5000");
+  const exec = vi.spyOn(db, "exec");
   const restoreEarly = (restore: () => void) => {
-    expect(reportsLocks(database)).toBe(false);
+    expect(reportsLocks(db)).toBe(false);
     restore();
-    expect([timeoutOf(database), reportsLocks(database)]).toEqual([{ timeout: 5000 }, true]);
+    expect([timeoutOf(db), reportsLocks(db)]).toEqual([{ timeout: 5000 }, true]);
   };
-  withTimeout(database, 25, restoreEarly, suppress);
-  expect([timeoutOf(database), reportsLocks(database)]).toEqual([{ timeout: 5000 }, true]);
+  withTimeout(db, 25, restoreEarly, suppress);
+  expect([timeoutOf(db), reportsLocks(db)]).toEqual([{ timeout: 5000 }, true]);
   expect(exec.mock.calls).toEqual([["PRAGMA busy_timeout = 25"], ["PRAGMA busy_timeout = 5000"]]);
 });
 
 it.each([undefined, { timeout: 19 }, { timeout: 37, open: false }])(
   "discards changed policy across close/reopen with constructor options %j",
   (options) => {
-    using database = options
-      ? openNodeSqliteDatabase(":memory:", options)
-      : new DatabaseSync(":memory:");
-    if (!database.isOpen) {
-      database.open();
+    using db = options ? openNodeSqliteDatabase(":memory:", options) : new DatabaseSync(":memory:");
+    if (!db.isOpen) {
+      db.open();
     }
     const timeout = options?.timeout ?? 0;
-    expect(readTimeout(database)).toBe(timeout);
-    writeTimeout(database, 73);
-    database.close();
-    database.open();
-    expect(readTimeout(database)).toBe(timeout);
-    withTimeout(database, 25, () => undefined);
-    expect(timeoutOf(database)).toEqual({ timeout });
+    expect(readTimeout(db)).toBe(timeout);
+    writeTimeout(db, 73);
+    db.close();
+    db.open();
+    expect(readTimeout(db)).toBe(timeout);
+    withTimeout(db, 25, () => undefined);
+    expect(timeoutOf(db)).toEqual({ timeout });
   },
 );
 
 it("rejects an invalid timeout", () => {
-  using database = new DatabaseSync(":memory:");
-  expect(() => withTimeout(database, -1, () => undefined)).toThrow(
+  using db = new DatabaseSync(":memory:");
+  expect(() => withTimeout(db, -1, () => undefined)).toThrow(
     "busyTimeoutMs must be a non-negative integer",
   );
 });
 
 it("suppresses expected lock warnings only for the scoped attempt", () => {
   const databasePath = path.join(tempDirs.make("sqlite-busy-timeout-"), "state.sqlite");
-  using database = new DatabaseSync(databasePath);
+  using db = new DatabaseSync(databasePath);
   using contender = new DatabaseSync(databasePath);
   const logger = { warn: vi.fn() };
-  database.exec("PRAGMA journal_mode = WAL; CREATE TABLE entries (id TEXT PRIMARY KEY)");
+  db.exec("PRAGMA journal_mode = WAL; CREATE TABLE entries (id TEXT PRIMARY KEY)");
   contender.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
 
   const attempt = () =>
-    runSqliteImmediateTransactionSync(database, () => undefined, {
+    runSqliteImmediateTransactionSync(db, () => undefined, {
       busyTimeoutMs: 0,
       logger,
     });
-  expect(() => withTimeout(database, 0, attempt, suppress)).toThrow();
+  expect(() => withTimeout(db, 0, attempt, suppress)).toThrow();
   expect(logger.warn).not.toHaveBeenCalled();
 });

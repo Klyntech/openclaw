@@ -16,7 +16,9 @@ const proof = {
   facts: { readiness: true, schemaVersion: 20 },
 };
 
-beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(verifiedAt));
+beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(verifiedAt);
+});
 afterEach(() => vi.restoreAllMocks());
 
 function fixture() {
@@ -43,35 +45,33 @@ it("persists validated facts until the first write invalidates them", () => {
   expect(() => invalidate(pathname)).not.toThrow();
 });
 
-it.each(["truncated", "changed-payload", "invalid-envelope"])(
-  "falls back to full validation after a %s seal",
-  (damage) => {
-    const { pathname, reject } = fixture();
-    const contents = fs.readFileSync(`${pathname}.seal`, "utf8");
-    fs.writeFileSync(
-      `${pathname}.seal`,
-      damage === "truncated"
-        ? contents.slice(0, contents.length / 2)
-        : damage === "changed-payload"
-          ? contents.replace('readiness\\":true', 'readiness\\":false')
-          : "[]",
-    );
-    reject("malformed-proof");
-  },
-);
+function editSeal(pathname: string, edit: (contents: string) => string) {
+  const seal = `${pathname}.seal`;
+  fs.writeFileSync(seal, edit(fs.readFileSync(seal, "utf8")));
+}
 
-it.each(["contents", "timestamp", "replacement"])("rejects external %s changes", (change) => {
+it.each([
+  ["truncated", "malformed-proof", (p: string) => editSeal(p, (s) => s.slice(0, s.length / 2))],
+  [
+    "changed-payload",
+    "malformed-proof",
+    (p: string) => editSeal(p, (s) => s.replace('readiness\\":true', 'readiness\\":false')),
+  ],
+  ["invalid-envelope", "malformed-proof", (p: string) => editSeal(p, () => "[]")],
+  ["contents", "file-mismatch", (p: string) => fs.appendFileSync(p, " changed")],
+  ["timestamp", "file-mismatch", (p: string) => fs.utimesSync(p, 1, 2)],
+  [
+    "replacement",
+    "file-mismatch",
+    (p: string) => {
+      fs.renameSync(p, `${p}.old`);
+      fs.copyFileSync(`${p}.old`, p);
+    },
+  ],
+] as const)("rejects %s damage", (_name, reason, damage) => {
   const { pathname, reject } = fixture();
-  if (change === "contents") {
-    fs.appendFileSync(pathname, " changed");
-  } else if (change === "timestamp") {
-    fs.utimesSync(pathname, 1, 2);
-  } else {
-    const displaced = `${pathname}.old`;
-    fs.renameSync(pathname, displaced);
-    fs.copyFileSync(displaced, pathname);
-  }
-  reject("file-mismatch");
+  damage(pathname);
+  reject(reason);
 });
 
 it.each(["-wal", "-journal"])("requires absent or empty %s files", (suffix) => {

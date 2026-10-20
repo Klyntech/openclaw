@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expectDefined } from "@openclaw/normalization-core/expect";
@@ -46,13 +45,8 @@ it("backs up and rebuilds only canonical FTS indexes without changing content", 
     })),
   );
   const rows = all(db, "SELECT * FROM session_transcript_fts");
-  expect(
-    classify(
-      db,
-      findings.map((row) => row.integrity_check),
-      schemas,
-    ),
-  ).toEqual(tables);
+  const messages = findings.map((row) => row.integrity_check);
+  expect(classify(db, messages, schemas)).toEqual(tables);
   const result = repairDoctor(db, pathname, {
     label: "agent main",
     assertCurrent: () => {},
@@ -62,19 +56,15 @@ it("backs up and rebuilds only canonical FTS indexes without changing content", 
     "Saved pre-repair SQLite backup: ",
     "",
   );
-  expect(fs.existsSync(backupPath)).toBe(true);
   using backup = new DatabaseSync(backupPath, { readOnly: true });
   expect(all(backup)).toEqual(findings);
   expect(all(db)).toEqual([{ integrity_check: "ok" }]);
   expect(all(db, "SELECT * FROM session_transcript_fts")).toEqual(rows);
   expect(all(db, "SELECT text FROM memory_index_chunks_fts")).toEqual([{ text: "ab\ufffecd" }]);
-  expect(
-    db
-      .prepare(
-        "SELECT count(*) AS n FROM session_transcript_fts WHERE session_transcript_fts MATCH ?",
-      )
-      .get('"ab\ufffecd"'),
-  ).toEqual({ n: 1 });
+  const matches = db.prepare(
+    "SELECT count(*) AS n FROM session_transcript_fts WHERE session_transcript_fts MATCH ?",
+  );
+  expect(matches.get('"ab\ufffecd"')).toEqual({ n: 1 });
 });
 
 it.each(["unknown", "drifted", "mixed"])(
