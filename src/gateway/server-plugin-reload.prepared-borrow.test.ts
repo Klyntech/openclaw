@@ -72,22 +72,15 @@ const { installGatewaySubagentModuleLoad } =
   await import("./server-startup-module-mocks.test-support.js");
 
 function modelConfig(workspace: string): Pick<OpenClawConfig, "agents" | "models"> {
+  const fixture = {
+    baseUrl: "https://fixture.invalid/v1",
+    api: "openai-completions" as const,
+    agentRuntime: { id: "openclaw" },
+    models: [{ ...makeModel("probe"), name: "Probe", contextWindow: 32000, maxTokens: 1024 }],
+  };
   return {
-    agents: {
-      ownership: "explicit",
-      entries: { main: { workspace, model: "fixture/probe" } },
-    },
-    models: {
-      mode: "replace",
-      providers: {
-        fixture: {
-          baseUrl: "https://fixture.invalid/v1",
-          api: "openai-completions",
-          agentRuntime: { id: "openclaw" },
-          models: [{ ...makeModel("probe"), name: "Probe", contextWindow: 32000, maxTokens: 1024 }],
-        },
-      },
-    },
+    agents: { ownership: "explicit", entries: { main: { workspace, model: "fixture/probe" } } },
+    models: { mode: "replace", providers: { fixture } },
   };
 }
 
@@ -190,7 +183,6 @@ async function createPublishedPluginFixture(
   return {
     initial,
     registryOwner,
-    scheduler,
     runtime,
     log,
     logs,
@@ -569,21 +561,17 @@ it.for(["cold start", "hot enable"] as const)(
       vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", bundledDir);
       vi.stubEnv("OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR", "1");
       vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", undefined);
+      const visitorConfig = () => ({
+        accountId: "test-account",
+        appId: "test-app",
+        apiToken: "synthetic-visitor-token",
+      });
       const configFor = (enabled: boolean): OpenClawConfig => ({
         ...modelConfig(state.workspaceDir),
         plugins: {
           allow: [pluginId],
           slots: { memory: "none" },
-          entries: {
-            [pluginId]: {
-              enabled,
-              config: {
-                accountId: "test-account",
-                appId: "test-app",
-                apiToken: "synthetic-visitor-token",
-              },
-            },
-          },
+          entries: { [pluginId]: { enabled, config: visitorConfig() } },
         },
         tools: { allow: [visitorToolName] },
       });
@@ -687,9 +675,7 @@ it.for(["cold start", "hot enable"] as const)(
           vi.unstubAllEnvs();
           vi.unstubAllGlobals();
         } finally {
-          for (const restore of startupModuleRestorers.toReversed()) {
-            restore();
-          }
+          startupModuleRestorers.toReversed().forEach((restore) => restore());
         }
       }
     }),

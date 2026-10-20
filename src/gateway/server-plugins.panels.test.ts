@@ -95,19 +95,16 @@ function createHarness() {
 it("binds the plugin ID and delivers only to the requesting browser", async () => {
   using harness = createHarness();
   await expect(harness.open()).resolves.toEqual({ ok: true });
+  const command = {
+    kind: "panel",
+    panel: "plugin",
+    pluginId: "review",
+    panelId: "document",
+    open: true,
+  };
   expect(harness.broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
     "ui.command",
-    {
-      sessionKey: "agent:main:main",
-      agentId: "main",
-      command: {
-        kind: "panel",
-        panel: "plugin",
-        pluginId: "review",
-        panelId: "document",
-        open: true,
-      },
-    },
+    { sessionKey: "agent:main:main", agentId: "main", command },
     new Set([harness.requester.connId]),
   );
 });

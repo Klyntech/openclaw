@@ -5,6 +5,7 @@ import {
 } from "../agents/command/model-ref.js";
 import { makeModel } from "../agents/embedded-agent-runner/model.test-harness.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/config.js";
+import type { ModelProviderConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withPluginRuntimePluginScope } from "../plugins/runtime/gateway-request-scope.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
@@ -33,33 +34,20 @@ vi.mock("../agents/provider-model-normalization.runtime.js", () => ({
 }));
 
 let config: OpenClawConfig;
+let provider: ModelProviderConfig;
 
 beforeEach(() => {
   dispatch.mockClear();
+  provider = { baseUrl: "https://fixture.invalid/v1", models: [] };
+  const subagent = { allowModelOverride: true, allowedModels: ["fixture/permitted"] };
   config = {
     agents: { entries: { worker: { model: "fixture/literal" } } },
-    models: {
-      providers: {
-        fixture: {
-          baseUrl: "https://fixture.invalid/v1",
-          models: [],
-        },
-      },
-    },
-    plugins: {
-      entries: {
-        "override-fixture": {
-          subagent: { allowModelOverride: true, allowedModels: ["fixture/permitted"] },
-        },
-      },
-    },
+    models: { providers: { fixture: provider } },
+    plugins: { entries: { "override-fixture": { subagent } } },
   };
 });
 
-afterEach(() => {
-  resetConfigRuntimeState();
-  vi.restoreAllMocks();
-});
+afterEach(resetConfigRuntimeState);
 
 function run(override: { provider?: string; model?: string }) {
   setRuntimeConfigSnapshot(config);
@@ -78,13 +66,13 @@ function run(override: { provider?: string; model?: string }) {
 }
 
 it("checks the exact configured execution target", async () => {
-  config.models!.providers!.fixture!.models = [makeModel("literal")];
+  provider.models = [makeModel("literal")];
   await expect(run({ provider: "fixture", model: "literal" })).rejects.toThrow(/not allowlisted/u);
   expect(dispatch).not.toHaveBeenCalled();
 });
 
 it("preserves an explicit API owner without configured model rows", async () => {
-  config.models!.providers!.fixture!.api = "openai-completions";
+  provider.api = "openai-completions";
   await expect(run({ model: "fixture/literal" })).rejects.toThrow(/not allowlisted/u);
   expect(dispatch).not.toHaveBeenCalled();
 });
