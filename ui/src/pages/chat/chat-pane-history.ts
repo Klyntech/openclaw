@@ -23,6 +23,7 @@ import {
   cloneChatAttachmentsForIndependentOwner,
   replaceChatAttachmentsFromEditor,
 } from "./attachment-payload-store.ts";
+import { projectChatFields } from "./chat-field-projection.ts";
 import { rewindChatHistory, switchChatHistoryBranch } from "./chat-history-actions.ts";
 import {
   fetchStagedOlderHistoryPage,
@@ -100,7 +101,8 @@ export abstract class ChatPaneHistory extends ChatPaneReplyNavigation {
       return;
     }
     const cacheKey = resolveChatSnapshotKey(state, { sessionKey });
-    const requests = chatHistoryRequests(state);
+    // Cache misses must release the pending header even when no transcript fields change.
+    const requests = projectChatFields(chatHistoryRequests(state), ["initialSnapshotHydration"]);
     const reading = store.read(cacheKey);
     const hydration: InitialChatSnapshotHydration = {
       sessionKey,
@@ -139,7 +141,7 @@ export abstract class ChatPaneHistory extends ChatPaneReplyNavigation {
         .catch(() => hydration.complete?.())
         .finally(() => {
           if (requests.initialSnapshotHydration === hydration && !hydration.wait) {
-            delete requests.initialSnapshotHydration;
+            requests.initialSnapshotHydration = undefined;
           }
         }),
     };

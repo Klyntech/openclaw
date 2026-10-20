@@ -22,6 +22,7 @@ import { readChatInputRunIds } from "./chat-pending-inputs.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import { refreshPageChat } from "./chat-state-refresh.ts";
 import { selectedChatSessionRow } from "./chat-state-route.ts";
+import { renderPaneHeaderInto } from "./components/chat-pane-header.test-support.ts";
 import { ChatPermissionPicker } from "./components/chat-permission-picker.tsx";
 import {
   installTranscriptDomMocks,
@@ -63,6 +64,31 @@ function composerControls(state: ChatPageHost, agentDefaultModel?: string) {
 }
 
 describe("mounted pane session event ownership", () => {
+  it("keeps the observed title when retained roster publication omits the open conversation", async () => {
+    const row: GatewaySessionRow = {
+      key: "agent:main:dashboard:observed-title",
+      agentId: "main",
+      sessionId: "observed-title",
+      kind: "direct",
+      label: "Current observed title",
+      updatedAt: 1,
+    };
+    const { sessions, mount } = createMountedPanes([row]);
+    await sessions.refresh({ agentId: "main", force: true });
+    const pane = mount(row.key);
+    await refreshPane(pane);
+    // Reconnect retains a sidebar window that need not include the open conversation.
+    Object.assign(sessions.presentation, { result: sessionsResult([], 1) });
+    pane.state.sessionsResult = sessions.presentation.result;
+    const header = document.createElement("div");
+    const layout = pane.render().layout;
+    if (!layout?.header) {
+      throw new Error("Expected chat header");
+    }
+    renderPaneHeaderInto(layout.header.header, header);
+    expect(header.querySelector(".chat-pane__session-title-text")?.textContent).toBe(row.label);
+  });
+
   it("retires Talk on a provider pause and prevents it from starting again", async () => {
     const row: GatewaySessionRow = {
       key: "agent:main:provider-pause",
