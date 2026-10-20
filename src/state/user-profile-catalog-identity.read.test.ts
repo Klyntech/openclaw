@@ -31,17 +31,15 @@ it("invalidates retained cohorts after worker commits and rollback without fresh
         ok: true,
         facts: { profile: { displayName } },
       });
+    const queries = [
+      ["freshness", /data_version/iu],
+      ["identities", /\bfrom\s+"?user_profile_identities\b/i],
+      ["profiles", /\bfrom\s+"?user_profiles\b/i],
+    ] as const;
     const counter = trackSqliteStatementExecutions(
       sqlite,
       ["profiles", "identities", "freshness"],
-      (sql) =>
-        /data_version/iu.test(sql)
-          ? "freshness"
-          : /\bfrom\s+"?user_profile_identities\b/i.test(sql)
-            ? "identities"
-            : /\bfrom\s+"?user_profiles\b/i.test(sql)
-              ? "profiles"
-              : null,
+      (sql) => queries.find(([, pattern]) => pattern.test(sql))?.[0] ?? null,
     );
     try {
       expectName("Original");

@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { UserProfile as UserProfileListItem } from "../../packages/gateway-protocol/src/schema/users.js";
 import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
-import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
@@ -10,7 +9,7 @@ import {
   executeOpenClawStateWorker,
   runOpenClawStateWorkerOperation,
 } from "./openclaw-state-worker-store.js";
-import { prepareUserProfileCatalog, publishUserProfilesChange } from "./user-profile-list.js";
+import { publishUserProfilesChange } from "./user-profile-list.js";
 import { listProfiles } from "./user-profile-reads.js";
 import {
   ensureCanonicalGatewayOwnerProfile,
@@ -21,6 +20,7 @@ import {
   setCanonicalUserProfileDisplayName,
   syncCanonicalGitHubIdentity,
 } from "./user-profile-writes.js";
+import { useProfileState } from "./user-profiles-fixture.test-support.js";
 import { ensureProfileForEmail } from "./user-profiles.js";
 
 vi.mock("./openclaw-state-worker-store.js", async (importOriginal) => {
@@ -32,22 +32,12 @@ vi.mock("./openclaw-state-worker-store.js", async (importOriginal) => {
   };
 });
 
-let state: Awaited<ReturnType<typeof createOpenClawTestState>>;
-let release = () => {};
-beforeEach(async () => {
-  state = await createOpenClawTestState({ layout: "state-only", prefix: "profile-owner-" });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  release();
-  release = () => {};
-  await state.cleanup();
-});
+const catalog = useProfileState();
 
 it("reuses committed email profiles and roster facts without writer admission across edits and merges", async () => {
   const first = await ensureCanonicalUserProfileForEmail("first@example.test");
   const second = await ensureCanonicalUserProfileForEmail("second@example.test");
-  release = (await prepareUserProfileCatalog()).release;
+  await catalog.hydrate();
   const expectResident = async (
     profile: typeof first,
     githubIdentity: UserProfileListItem["githubIdentity"] = null,
@@ -120,7 +110,7 @@ it("reuses committed email profiles and roster facts without writer admission ac
 
 it("serves the first owner ensure after catalog hydration and applies write receipts", async () => {
   const owner = await ensureCanonicalGatewayOwnerProfile("Host Person");
-  release = (await prepareUserProfileCatalog()).release;
+  await catalog.hydrate();
   vi.mocked(runOpenClawStateWorkerOperation).mockClear();
   const sql = observeMainThreadSql();
   const reused = await ensureCanonicalGatewayOwnerProfile("Host Person");
@@ -169,7 +159,7 @@ it.each(["missing", "misbound", "merged"] as const)(
   async (kind) => {
     const owner = await ensureCanonicalGatewayOwnerProfile("Host Person");
     const person = ensureProfileForEmail("person@example.test");
-    release = (await prepareUserProfileCatalog()).release;
+    await catalog.hydrate();
     const { db } = openOpenClawStateDatabase();
     runOpenClawStateWriteTransaction(() => {
       if (kind === "missing") {

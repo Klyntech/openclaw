@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import { GIT_COAUTHOR_PREFERENCE_KEY as coauthor } from "../../packages/gateway-protocol/src/schema/user-profile-constants.js";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { enableNodeSqliteKyselyStatementCache } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase, requireNodeSqlite } from "../infra/node-sqlite.js";
 import { admitSqliteSchema, runSqliteReadOperationSync } from "../infra/sqlite-schema-facts.js";
@@ -12,7 +10,6 @@ import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import * as stateDatabase from "./openclaw-state-db.js";
 import {
   closeOpenClawStateDatabaseForTest,
-  closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 import { getUserPreferences, setUserPreferences } from "./user-preferences.test-support.js";
@@ -32,6 +29,11 @@ import {
 import { createProfileAvatarReader } from "./user-profiles-avatar.js";
 import { getProfileAvatar } from "./user-profiles-avatar.test-support.js";
 import {
+  avatarPng,
+  avatarResponse,
+  useProfileDatabase,
+} from "./user-profiles-fixture.test-support.js";
+import {
   inspectProfileAvatarInDatabase,
   selectProfileDisplayEntries,
   selectResolvedUserProfileMetadataById,
@@ -43,20 +45,7 @@ import {
   ensureProfileForTailscaleIdentity,
 } from "./user-profiles.js";
 
-const catalogReleases: Array<() => void> = [];
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    for (const release of catalogReleases.splice(0)) {
-      release();
-    }
-    await closeOpenClawStateDatabaseAsync();
-    closeOpenClawStateDatabaseForTest();
-    cleanup();
-  });
-});
-
-let options: { path: string };
+const { options, tempDirs, hydrate } = useProfileDatabase("openclaw-user-profiles-");
 
 const ensureProvider = (login: string, name?: string) =>
   ensureProfileForTailscaleIdentity({ login, name }, options);
@@ -83,15 +72,15 @@ function github(
 }
 
 const avatarUrl = "https://avatars.example.test/profile";
-function avatarResponse() {
-  const bytes = readFileSync(join(process.cwd(), "ui/public/favicon-32.png"));
-  return new Response(Uint8Array.from(bytes).buffer, { headers: { "content-type": "image/png" } });
+function duringWriterAdmission(run: () => void) {
+  const original = stateDatabase.runOpenClawStateWriteTransaction;
+  vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce((...args) => {
+    run();
+    return original(...args);
+  });
 }
 
 describe("user profiles", () => {
-  beforeEach(() => {
-    options = { path: join(tempDirs.make("openclaw-user-profiles-"), "openclaw.sqlite") };
-  });
   it.each([false, true])(
     "display lookup leaves absent storage absent (database exists: %s)",
     (exists) => {
@@ -113,14 +102,10 @@ describe("user profiles", () => {
       kind === "email"
         ? () => ensureEmail("racing@example.test")
         : () => ensureProvider("racing@github");
-    const original = stateDatabase.runOpenClawStateWriteTransaction;
     let competing: ReturnType<typeof ensureProfileForEmail> | undefined;
-    vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce(
-      (operation, databaseOptions, transactionOptions) => {
-        competing = ensure();
-        return original(operation, databaseOptions, transactionOptions);
-      },
-    );
+    duringWriterAdmission(() => {
+      competing = ensure();
+    });
     expect(ensure()).toEqual(competing);
     expect(competing).toBeDefined();
     expect(readUserProfileSnapshotSync(options).profiles).toHaveLength(2);
@@ -128,13 +113,9 @@ describe("user profiles", () => {
 
   it("preserves a custom name saved while waiting to adopt a provider name", () => {
     const profile = ensureProvider("racing@github");
-    const original = stateDatabase.runOpenClawStateWriteTransaction;
-    vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce(
-      (operation, databaseOptions, transactionOptions) => {
-        setDisplayName(profile.id, "User Chosen", options);
-        return original(operation, databaseOptions, transactionOptions);
-      },
-    );
+    duringWriterAdmission(() => {
+      setDisplayName(profile.id, "User Chosen", options);
+    });
     expect(ensureProvider("racing@github", "Provider Name")).toMatchObject({
       id: profile.id,
       displayName: "User Chosen",
@@ -254,7 +235,7 @@ describe("user profiles", () => {
     const updated = github(10, "Ada", { name: "Ada Lovelace", email: "alias@example.com" });
     expect(updated).toMatchObject({ id: target.id, displayName: "Ada Lovelace" });
     closeOpenClawStateDatabaseForTest();
-    catalogReleases.push((await prepareUserProfileCatalog(options)).release);
+    await hydrate();
     expect(getUserProfileDisplay(source.id, options)).toMatchObject({
       id: target.id,
       displayName: "Ada Lovelace",
@@ -415,7 +396,7 @@ describe("user profiles", () => {
     expect(db.prepare("SELECT email, profile_id FROM user_profile_emails").all()).toEqual([
       { email: "person@gmail.com", profile_id: email.id },
     ]);
-    catalogReleases.push((await prepareUserProfileCatalog(options)).release);
+    await hydrate();
     expect(getUserProfileDisplay(provider.id, options).displayName).toBe("User Chosen");
     expect(avatar(provider.id)?.bytes).toEqual(new Uint8Array([9, 8, 7]));
   });
@@ -464,13 +445,9 @@ describe("avatar database lifetime", () => {
         setDisplayName(profile.id, "Edited during fetch", originalOptions);
         env.OPENCLAW_STATE_DIR = otherDirectory;
         const other = ensureProfileForEmail("other@example.test", sourceOptions);
-        const bytes = readFileSync(join(process.cwd(), "ui/public/favicon-32.png"));
+        const bytes = avatarPng();
         response.resolve(
-          fetched
-            ? new Response(Uint8Array.from(bytes).buffer, {
-                headers: { "content-type": "image/png" },
-              })
-            : new Response("unavailable", { status: 503 }),
+          fetched ? avatarResponse(bytes) : new Response("unavailable", { status: 503 }),
         );
 
         await expect(pending).resolves.toMatchObject({

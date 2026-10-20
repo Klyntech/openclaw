@@ -1,7 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { describe, expect, it } from "vitest";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -9,27 +7,15 @@ import {
 } from "./openclaw-state-db.js";
 import { readUserProfileAliasRevision } from "./user-profile-events.js";
 import { readUserProfileSnapshotSync } from "./user-profile-list-item.test-support.js";
-import { prepareUserProfileCatalog, readUserProfileAliases } from "./user-profile-list.js";
+import { readUserProfileAliases } from "./user-profile-list.js";
 import { syncGitHubIdentity } from "./user-profile-writes.worker.js";
+import { useProfileDatabase } from "./user-profiles-fixture.test-support.js";
 import { repairMergedGatewayOwnerProfile } from "./user-profiles-owner-migration.js";
 import { mergeOwnerIntoPerson, profileState } from "./user-profiles-owner.test-support.js";
 import { ensureGatewayOwnerProfile, ensureProfileForTailscaleIdentity } from "./user-profiles.js";
 
-const catalogReleases: Array<() => void> = [];
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
-  afterEach(() => {
-    for (const release of catalogReleases.splice(0)) {
-      release();
-    }
-    closeOpenClawStateDatabaseForTest();
-    cleanup();
-  });
-});
+const { options, hydrate } = useProfileDatabase("openclaw-owner-migration-");
 
-let options: { path: string };
-beforeEach(() => {
-  options = { path: join(tempDirs.make("openclaw-owner-migration-"), "openclaw.sqlite") };
-});
 const repair = (shouldRepair: boolean) =>
   repairMergedGatewayOwnerProfile({ ...options, shouldRepair });
 const readProfile = (id: string) =>
@@ -60,7 +46,7 @@ describe("Doctor gateway owner repair", () => {
       const personBefore = readProfile(person.id);
       const before = profileState(options);
       const aliasRevision = readUserProfileAliasRevision();
-      catalogReleases.push((await prepareUserProfileCatalog(options)).release);
+      await hydrate();
       expect(readUserProfileAliases(owner.id, options)).toEqual(new Set([owner.id, person.id]));
       expect(readUserProfileAliases(person.id, options)).toEqual(new Set([owner.id, person.id]));
 

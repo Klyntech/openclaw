@@ -1,9 +1,7 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { StatementSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GIT_COAUTHOR_PREFERENCE_KEY } from "../../packages/gateway-protocol/src/index.js";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import * as stateReads from "./openclaw-state-db-readonly.js";
 import { withOpenClawStateDatabaseReadSnapshot } from "./openclaw-state-db-readonly.js";
 import {
@@ -23,32 +21,19 @@ import {
   getUserProfileListItem,
   readUserProfileSnapshotSync,
 } from "./user-profile-list-item.test-support.js";
-import { getUserProfileDisplay, prepareUserProfileCatalog } from "./user-profile-list.js";
+import { getUserProfileDisplay } from "./user-profile-list.js";
 import {
   readUserProfileDirectory,
   resolveCanonicalCachedGitHubIdentity,
 } from "./user-profile-reads.js";
 import { linkEmail, setAvatar, syncGitHubIdentity } from "./user-profile-writes.worker.js";
 import { getProfileAvatar } from "./user-profiles-avatar.test-support.js";
+import { useProfileDatabase } from "./user-profiles-fixture.test-support.js";
 import { ensureUserProfilesSchema } from "./user-profiles-schema.js";
 import { ensureProfileForEmail, ensureProfileForTailscaleIdentity } from "./user-profiles.js";
 import { userProfileOperations } from "./user-profiles.worker.js";
 
-const catalogReleases: Array<() => void> = [];
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
-  afterEach(async () => {
-    for (const release of catalogReleases.splice(0)) {
-      release();
-    }
-    await closeOpenClawStateDatabaseAsync();
-    closeOpenClawStateDatabaseForTest();
-    cleanup();
-  });
-});
-let options: { path: string };
-beforeEach(() => {
-  options = { path: join(tempDirs.make("openclaw-multi-account-"), "openclaw.sqlite") };
-});
+const { options, hydrate } = useProfileDatabase("openclaw-multi-account-");
 
 function syncEmailGitHubProfile(params: {
   accountId: number;
@@ -294,7 +279,7 @@ describe("multi-account people", () => {
     linkEmail(secondary.email, person.id, options);
     expect(beforeMerge.isCurrent()).toBe(false);
     closeOpenClawStateDatabaseForTest();
-    catalogReleases.push((await prepareUserProfileCatalog(options)).release);
+    await hydrate();
     for (const account of [secondary, primary, secondary]) {
       expect(syncEmailGitHubProfile(account)).toMatchObject({
         id: person.id,
