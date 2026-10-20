@@ -1,9 +1,9 @@
 import { expect, it, vi, type Mock } from "vitest";
-import { createDeferredCore } from "../shared/deferred.js";
 import { createLazyCoreHandlers } from "./server-methods/lazy-core-handlers.js";
 import type { GatewayRequestHandlerOptions } from "./server-methods/types.js";
 import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispatch.js";
 import { createContext } from "./server-plugin-in-process-dispatch.test-support.js";
+import { heldWork } from "./server-plugin-reload.fixture-tools.test-support.js";
 
 export function registerInProcessGatewayDispatchPreparationTests({
   startTurn,
@@ -24,12 +24,10 @@ export function registerInProcessGatewayDispatchPreparationTests({
     async ({ method, outcome }) => {
       const context = createContext();
       let current = context;
-      const entered = createDeferredCore();
-      const release = createDeferredCore();
+      const gate = heldWork();
       const createFacade = context.createAgentTurnFacade!;
       context.createAgentTurnFacade = async (principal) => {
-        entered.resolve();
-        await release.promise;
+        await gate.run();
         return createFacade(principal);
       };
       const prepareDispatchCurrent = vi.fn(async () => {
@@ -56,12 +54,12 @@ export function registerInProcessGatewayDispatchPreparationTests({
         outcome === "current"
           ? expect(pending).resolves.toEqual(response)
           : expect(pending).rejects.toThrow("current gateway instance binding");
-      await entered.promise;
+      await gate.entered;
       expect(prepareDispatchCurrent).not.toHaveBeenCalled();
       if (outcome === "retired-factory") {
         current = createContext();
       }
-      release.resolve();
+      gate.release();
       await result;
       expect(prepareDispatchCurrent).toHaveBeenCalledTimes(outcome === "retired-factory" ? 0 : 1);
       expect(startTurn).toHaveBeenCalledTimes(outcome === "current" && method === "agent" ? 1 : 0);
@@ -74,16 +72,14 @@ export function registerInProcessGatewayDispatchPreparationTests({
   it.each(["current", "replaced"])(
     "checks a %s Gateway after raw dispatch preparation before invoking its handler",
     async (outcome) => {
-      const entered = createDeferredCore();
-      const release = createDeferredCore();
+      const gate = heldWork();
       const handler = vi.fn(({ respond }: GatewayRequestHandlerOptions) => {
         respond(true, { ok: true });
       });
       const handlers = createLazyCoreHandlers({
         methods: ["health"],
         loadHandlers: async () => {
-          entered.resolve();
-          await release.promise;
+          await gate.run();
           return { health: handler };
         },
       });
@@ -104,9 +100,9 @@ export function registerInProcessGatewayDispatchPreparationTests({
           prepareDispatchCurrent,
         },
       );
-      await entered.promise;
+      await gate.entered;
       expect(prepareDispatchCurrent).not.toHaveBeenCalled();
-      release.resolve();
+      gate.release();
       if (outcome === "current") {
         await expect(pending).resolves.toEqual({ ok: true });
       } else {

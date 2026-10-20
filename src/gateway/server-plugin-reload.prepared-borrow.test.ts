@@ -183,12 +183,34 @@ async function createPublishedPluginFixture(
   };
   return {
     initial,
-    metadataSnapshot,
     registryOwner,
     scheduler,
     runtime,
     log,
-    reloadOptions,
+    reload(
+      nextConfig: OpenClawConfig,
+      changedPaths: string[],
+      pluginLifecycle?: Parameters<typeof reloadGatewayPlugins>[1]["pluginLifecycle"],
+      publishConfig?: () => void,
+    ) {
+      return reloadGatewayPlugins(reloadOptions, {
+        nextConfig,
+        sourceConfig: nextConfig,
+        changedPaths,
+        pluginLifecycle,
+        env,
+        prepareConfigEffects: () => ({
+          retire: () =>
+            markPreparedModelRuntimeSnapshotsStale("plugin reload", { waitForReplacement: true }),
+          rollback: async () => {},
+        }),
+        commitRuntime: async (publication) => {
+          publication?.publish();
+          publishConfig?.();
+          publication?.afterCommit?.();
+        },
+      });
+    },
     async acquireTurn(
       snapshot?: Awaited<ReturnType<typeof loadPublishedGatewayReplyDispatchRuntime>>,
     ): Promise<PreparedModelRuntimeLease> {
@@ -327,7 +349,6 @@ describe("prepared Gateway plugin borrowing", () => {
           "",
         );
         vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", "1");
-        const env = process.env;
         const config: OpenClawConfig = {
           ...modelConfig(state.workspaceDir),
           plugins: {
@@ -351,7 +372,7 @@ describe("prepared Gateway plugin borrowing", () => {
           debug: vi.fn(),
         };
         const fixture = await createPublishedPluginFixture(config, state.workspaceDir, logs);
-        const { initial, registryOwner, reloadOptions } = fixture;
+        const { initial, registryOwner } = fixture;
         const gatewayRecord = (registry: PluginRegistry) => {
           const record = registry.plugins.find((entry) => entry.id === toolPluginId);
           assert(record);
@@ -408,35 +429,16 @@ describe("prepared Gateway plugin borrowing", () => {
             await next[Symbol.asyncDispose]();
             await closePreparedModelRuntimeSnapshots();
             expect(oldInstance.owner?.registry).toBe(initial.pluginRegistry);
-            expect(oldInstance.acceptingCalls).toBe(true);
-            expect(oldInstance.disposing).toBe(false);
+            expect(oldInstance).toMatchObject({ acceptingCalls: true, disposing: false });
             return;
           }
 
           // plugins.reload queues behind the admitted turn instead of disposing its instance.
           const startReload = () =>
-            reloadGatewayPlugins(reloadOptions, {
-              nextConfig: config,
-              sourceConfig: config,
-              changedPaths: [],
-              pluginLifecycle: {
-                pluginIds: [toolPluginId],
-                reason: "reload",
-                operationId: "borrow-reload",
-              },
-              prepareConfigEffects: () => ({
-                retire: () => {
-                  markPreparedModelRuntimeSnapshotsStale("plugin reload", {
-                    waitForReplacement: true,
-                  });
-                },
-                rollback: async () => {},
-              }),
-              env,
-              commitRuntime: async (publication) => {
-                publication?.publish();
-                publication?.afterCommit?.();
-              },
+            fixture.reload(config, [], {
+              pluginIds: [toolPluginId],
+              reason: "reload",
+              operationId: "borrow-reload",
             });
           if (change === "tool handoff") {
             const sessionKey = "agent:main:reload-handoff";
@@ -539,8 +541,7 @@ describe("prepared Gateway plugin borrowing", () => {
           }
           expect(logs.info).toHaveBeenCalledWith(`Plugin replacement applied: ${toolPluginId}`);
           await disposed.promise;
-          expect(oldInstance.disposing).toBe(true);
-          expect(oldInstance.acceptingCalls).toBe(false);
+          expect(oldInstance).toMatchObject({ disposing: true, acceptingCalls: false });
 
           // The refreshed prepared runtime borrows the reloaded Gateway instance.
           const nextRecord = gatewayRecord(registryOwner.registry);
@@ -580,7 +581,6 @@ describe("published Gateway plugin services", () => {
         vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", bundledDir);
         vi.stubEnv("OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR", "1");
         vi.stubEnv("OPENCLAW_DISABLE_BUNDLED_PLUGINS", undefined);
-        const env = process.env;
         const configFor = (enabled: boolean): OpenClawConfig => ({
           ...modelConfig(state.workspaceDir),
           plugins: {
@@ -610,7 +610,7 @@ describe("published Gateway plugin services", () => {
             services = handle;
           },
         });
-        const { initial, registryOwner, scheduler, runtime, log, reloadOptions } = fixture;
+        const { initial, registryOwner, scheduler, runtime, log } = fixture;
         const startupModuleRestorers: Array<() => void> = [];
         let runLease: Awaited<ReturnType<typeof acquireAgentRunPreparedModelRuntime>> | undefined;
         try {
@@ -667,33 +667,15 @@ describe("published Gateway plugin services", () => {
               previousConfig: config,
               candidateConfig: nextConfig,
             });
-            expect(plan.reloadPlugins).toBe(true);
-            expect(plan.restartGateway).toBe(false);
+            expect(plan).toMatchObject({ reloadPlugins: true, restartGateway: false });
             await state.writeConfig(nextConfig);
-            await reloadGatewayPlugins(reloadOptions, {
-              nextConfig,
-              sourceConfig: nextConfig,
-              changedPaths,
-              prepareConfigEffects: () => ({
-                retire: () => {
-                  markPreparedModelRuntimeSnapshotsStale(
-                    "prepared model runtime owner is stale before plugin replacement",
-                    { waitForReplacement: true },
-                  );
-                },
-                rollback: async () => {},
-              }),
-              env,
-              commitRuntime: async (publication) => {
-                publication?.publish();
-                markPreparedModelRuntimeSnapshotsStale(
-                  "prepared model runtime owner is stale before config publication",
-                  { waitForReplacement: true },
-                );
-                config = nextConfig;
-                setRuntimeConfigSnapshot(config);
-                publication?.afterCommit?.();
-              },
+            await fixture.reload(nextConfig, changedPaths, undefined, () => {
+              markPreparedModelRuntimeSnapshotsStale(
+                "prepared model runtime owner is stale before config publication",
+                { waitForReplacement: true },
+              );
+              config = nextConfig;
+              setRuntimeConfigSnapshot(config);
             });
             expect(logs.info).toHaveBeenCalledWith(`Plugin replacement applied: ${pluginId}`);
             await fixture.refresh(config);

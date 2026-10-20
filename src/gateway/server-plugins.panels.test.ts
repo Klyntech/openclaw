@@ -15,7 +15,6 @@ import {
   withPluginRuntimePluginScope,
 } from "../plugins/runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
-import { createDeferredCore } from "../shared/deferred.js";
 import { createRequestGatewayMethodRegistry } from "./server-methods.js";
 import { createLazyCoreHandlers } from "./server-methods/lazy-core-handlers.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
@@ -24,6 +23,7 @@ import {
   createContext,
   createOperatorClient,
 } from "./server-plugin-in-process-dispatch.test-support.js";
+import { heldWork } from "./server-plugin-reload.fixture-tools.test-support.js";
 
 function createHarness(scope = "operator.write") {
   const registry = createEmptyPluginRegistry();
@@ -109,51 +109,41 @@ describe("plugin panel runtime through the Gateway router", () => {
     );
   });
 
-  it.for([
-    {
-      change: "caller revoked",
-      revoke: (h: ReturnType<typeof createHarness>) => h.revoke(),
-      error: /authority/,
-    },
-    {
-      change: "caller scopes downgraded",
-      revoke: (h: ReturnType<typeof createHarness>) => {
+  it.for<[string, (h: ReturnType<typeof createHarness>) => void, RegExp]>([
+    ["caller revoked", (h) => h.revoke(), /authority/],
+    [
+      "caller scopes downgraded",
+      (h) => {
         h.requester.connect.scopes = ["operator.read"];
       },
-      error: /authority|scope/,
-    },
-    {
-      change: "plugin retired",
-      revoke: (h: ReturnType<typeof createHarness>) => markPluginRegistryRetired(h.registry),
-      error: /current plugin runtime/,
-    },
-    {
-      change: "plugin disabled",
-      revoke: (h: ReturnType<typeof createHarness>) => {
+      /authority|scope/,
+    ],
+    ["plugin retired", (h) => markPluginRegistryRetired(h.registry), /current plugin runtime/],
+    [
+      "plugin disabled",
+      (h) => {
         h.plugin.enabled = false;
       },
-      error: /current plugin runtime/,
-    },
-    {
-      change: "requester disconnected",
-      revoke: (h: ReturnType<typeof createHarness>) => {
+      /current plugin runtime/,
+    ],
+    [
+      "requester disconnected",
+      (h) => {
         h.requester.invalidated = true;
       },
-      error: /authority|no longer connected/,
-    },
+      /authority|no longer connected/,
+    ],
   ])(
-    "rejects $change during handler preparation without redirecting delivery",
-    async ({ revoke, error }, { signal }) => {
+    "rejects %s during handler preparation without redirecting delivery",
+    async ([, revoke, error], { signal }) => {
       using harness = createHarness();
-      const entered = createDeferredCore();
-      const release = createDeferredCore();
+      const gate = heldWork();
       // Keep the real method classification, authorization, router and final handler.
       // Only lazy loading is held so revocation happens after initial authorization.
       const handlers = createLazyCoreHandlers({
         methods: ["ui.command"],
         loadHandlers: async () => {
-          entered.resolve();
-          await release.promise;
+          await gate.run();
           return uiCommandHandlers;
         },
       });
@@ -164,7 +154,7 @@ describe("plugin panel runtime through the Gateway router", () => {
       try {
         await withinTest(
           awaitGateBeforeSettlement(
-            entered.promise,
+            gate.entered,
             pending,
             "panel request settled before preparation",
           ),
@@ -173,7 +163,7 @@ describe("plugin panel runtime through the Gateway router", () => {
         expect(harness.broadcastToConnIds).not.toHaveBeenCalled();
         revoke(harness);
       } finally {
-        release.resolve();
+        gate.release();
       }
       await rejected;
       await expect(harness.open()).rejects.toThrow(error);
