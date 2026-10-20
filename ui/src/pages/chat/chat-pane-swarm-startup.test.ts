@@ -9,93 +9,76 @@ import { sessionsResult } from "../../lib/sessions/session-capability.test-suppo
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { createTestChatPane } from "./chat-pane.test-support.ts";
 
-function createGlobalPane(failMainParent = false) {
-  const parentAgents: unknown[] = [];
-  const childParents: unknown[] = [];
-  const agents = {
-    defaultId: "main",
-    mainKey: "main",
-    scope: "global" as const,
-    agents: [{ id: "main" }, { id: "research" }],
-  };
-  const client = createTestGatewayClient(async (method, raw) => {
-    const params = asOptionalRecord(raw);
-    switch (method) {
-      case "models.list":
-        return { models: [] };
-      case "agents.list":
-        return agents;
-      case "agent.identity.get":
-        return { agentId: params?.agentId, name: "Assistant" };
-      case "sessions.subscribe":
-        return { subscribed: true };
-      case "sessions.describe":
-        if (params?.key !== "global") {
-          return {};
-        }
+it.each(
+  (["snapshot", "selection"] as const).flatMap((transition) =>
+    (["connect", "retry"] as const).map((phase) => ({ phase, transition })),
+  ),
+)(
+  "retires an old global agent's pending $phase during $transition while the next foreground chat holds hydration",
+  async ({ phase, transition }) => {
+    vi.useFakeTimers();
+    const parentAgents: unknown[] = [];
+    const childParents: unknown[] = [];
+    const agents = {
+      defaultId: "main",
+      mainKey: "main",
+      scope: "global" as const,
+      agents: [{ id: "main" }, { id: "research" }],
+    };
+    const client = createTestGatewayClient(async (method, raw) => {
+      const params = asOptionalRecord(raw);
+      if (method === "sessions.describe" && params?.key === "global") {
         parentAgents.push(params.agentId);
-        if (failMainParent && params.agentId === "main") {
+        if (phase === "retry" && params.agentId === "main") {
           throw new Error("temporary parent read failure");
         }
         return { session: null };
-      case "sessions.list":
+      }
+      if (method === "sessions.list") {
         if (params?.spawnedBy) {
           childParents.push(params.spawnedBy);
         }
         return sessionsResult([], 1);
-      default:
-        return {};
-    }
-  });
-  const { pane, state } = createTestChatPane({ client });
-  state.sessionKey = "global";
-  state.assistantAgentId = "main";
-  state.agentsList = agents;
-  pane.sessionKey = "global";
-  const snapshot = {
-    ...pane.context.gateway.snapshot,
-    assistantAgentId: "main",
-    hello: {
-      ...state.hello!,
-      snapshot: {
-        sessionDefaults: {
-          defaultAgentId: "main",
-          mainKey: "main",
-          mainSessionKey: "global",
-          scope: "global",
+      }
+      const responses = new Map<string, unknown>([
+        ["models.list", { models: [] }],
+        ["agents.list", agents],
+        ["agent.identity.get", { agentId: params?.agentId, name: "Assistant" }],
+        ["sessions.subscribe", { subscribed: true }],
+      ]);
+      return responses.get(method) ?? {};
+    });
+    const { pane, state } = createTestChatPane({ client });
+    Object.assign(state, { sessionKey: "global", assistantAgentId: "main", agentsList: agents });
+    pane.sessionKey = "global";
+    const snapshot = {
+      ...pane.context.gateway.snapshot,
+      assistantAgentId: "main",
+      hello: {
+        ...state.hello!,
+        snapshot: {
+          sessionDefaults: {
+            defaultAgentId: "main",
+            mainKey: "main",
+            mainSessionKey: "global",
+            scope: "global",
+          },
         },
       },
-    },
-  };
-  const coordinator = pane.context.connectionBootstrap;
-  return { pane, snapshot, coordinator, parentAgents, childParents };
-}
-
-it.each([
-  { phase: "connect", transition: "snapshot" },
-  { phase: "retry", transition: "snapshot" },
-  { phase: "connect", transition: "selection" },
-  { phase: "retry", transition: "selection" },
-] as const)(
-  "retires an old global agent's pending $phase during $transition while the next foreground chat holds hydration",
-  async ({ phase, transition }) => {
-    vi.useFakeTimers();
-    const { pane, snapshot, coordinator, parentAgents, childParents } = createGlobalPane(
-      phase === "retry",
-    );
+    };
+    const coordinator = pane.context.connectionBootstrap;
     try {
       pane.applyGatewaySnapshot(snapshot);
       if (transition === "selection") {
-        const runtimeConfig = createRuntimeConfigCapability(pane.context.gateway);
-        const placementStartup = createApplicationPlacementStartup(pane.context);
-        Object.assign(pane.context, {
+        const services = {
           config: createApplicationConfigCapability({ resourceBasePath: "" }),
-          runtimeConfig,
-          placementStartup,
-        });
+          runtimeConfig: createRuntimeConfigCapability(pane.context.gateway),
+          placementStartup: createApplicationPlacementStartup(pane.context),
+        };
+        Object.assign(pane.context, services);
         onTestFinished(() => {
-          runtimeConfig.dispose();
-          placementStartup.dispose();
+          services.runtimeConfig.dispose();
+          services.placementStartup.dispose();
         });
         pane.connectedCallback();
       }

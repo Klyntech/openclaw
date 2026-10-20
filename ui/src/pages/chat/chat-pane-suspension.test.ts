@@ -2,7 +2,6 @@
 /* @vitest-environment-options {"url":"http://chat-pane-suspension.test/"} */
 
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { GatewayBrowserClient } from "../../api/gateway.ts";
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import {
@@ -23,8 +22,8 @@ function setVisibility(next: DocumentVisibilityState) {
   visibility = next;
   document.dispatchEvent(new Event("visibilitychange"));
 }
-function createPane(client = createTestGatewayClient(async () => ({}))) {
-  const fixture = createTestChatPane({ client });
+function createPane() {
+  const fixture = createTestChatPane({ client: createTestGatewayClient(async () => ({})) });
   fixture.pane.render = () => ({ layout: null });
   panes.push(fixture.pane);
   return fixture;
@@ -42,9 +41,7 @@ afterEach(() => {
 
 it("pauses minute updates while hidden and refreshes once on return", async () => {
   vi.useFakeTimers();
-  const client = new GatewayBrowserClient({ url: "ws://example.test" });
-  vi.spyOn(client, "request").mockResolvedValue({});
-  const { pane } = createPane(client);
+  const { pane } = createPane();
   connectPaneTestView(pane);
   await pane.updateComplete;
   const render = vi.spyOn(pane, "render");
@@ -77,17 +74,11 @@ it("commits each retained presentation's live draft before the document can susp
     connectPaneTestView(pane);
     return { pane, draft, state, textarea };
   });
-  try {
-    await Promise.all(presentations.map(({ pane }) => pane.updateComplete));
-    setVisibility("hidden");
-    for (const { draft, state, textarea } of presentations) {
-      expect(state.handleChatDraftChange).toHaveBeenCalledExactlyOnceWith(textarea.value);
-      expect(state.chatMessage).toBe(textarea.value);
-      expect(draft.read().draft).toBe(textarea.value);
-    }
-  } finally {
-    setVisibility("visible");
-    await Promise.all(presentations.map(({ pane }) => pane.updateComplete));
+  await Promise.all(presentations.map(({ pane }) => pane.updateComplete));
+  setVisibility("hidden");
+  for (const { draft, state, textarea } of presentations) {
+    expect(state.handleChatDraftChange).toHaveBeenCalledExactlyOnceWith(textarea.value);
+    expect([state.chatMessage, draft.read().draft]).toEqual([textarea.value, textarea.value]);
   }
 });
 

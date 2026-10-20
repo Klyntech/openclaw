@@ -8,23 +8,16 @@ import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
 import { syncSelectedSessionMessageSubscription } from "./chat-history-subscription.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import { createRefreshChatPane, nativeHistoryMessage } from "./chat-pane-history.test-support.ts";
-import {
-  createGatewayBrowserClientFixture,
-  createInitializationContext,
-  createRenderTestChatPane,
-  createSessionCapabilityFixture,
-} from "./chat-pane.test-support.ts";
+import * as paneTest from "./chat-pane.test-support.ts";
 
 it("automatically restores live observation after a subscription timeout without a composer error", async () => {
   vi.useFakeTimers();
-  onTestFinished(() => {
-    vi.useRealTimers();
-  });
+  onTestFinished(() => vi.useRealTimers());
   const sessionKey = "agent:main:subscription-recovery";
   const messages = [nativeHistoryMessage(2, "The node completed the work.")];
   let observing = false;
   const subscriptions: unknown[] = [];
-  const client = createGatewayBrowserClientFixture({
+  const client = paneTest.createGatewayBrowserClientFixture({
     request: async (method, params) => {
       if (method === "sessions.messages.subscribe") {
         subscriptions.push(params);
@@ -64,14 +57,16 @@ it("automatically restores live observation after a subscription timeout without
 });
 
 it("reports each transcript loading edge from the load owner", async () => {
-  const pane = createRenderTestChatPane();
-  const first = createDeferred<ChatHistoryResult>();
-  const second = createDeferred<ChatHistoryResult>();
-  const pending = [first.promise, second.promise];
-  const client = createGatewayBrowserClientFixture({ request: () => pending.shift() });
+  const pane = paneTest.createRenderTestChatPane();
+  const responses = Array.from({ length: 2 }, () => createDeferred<ChatHistoryResult>());
+  const pending = responses.map(({ promise }) => promise);
+  const client = paneTest.createGatewayBrowserClientFixture({ request: () => pending.shift() });
   const context = {
-    ...createInitializationContext(),
-    sessions: createSessionCapabilityFixture({ state: { agentId: "main" }, reconcile: vi.fn() }),
+    ...paneTest.createInitializationContext(),
+    sessions: paneTest.createSessionCapabilityFixture({
+      state: { agentId: "main" },
+      reconcile: vi.fn(),
+    }),
   };
   Object.assign(context.gateway.snapshot, { client, phase: "connected" });
   const state = pane.initialize(context);
@@ -79,12 +74,11 @@ it("reports each transcript loading edge from the load owner", async () => {
   const changed = vi.fn();
   pane.addEventListener("openclaw-chat-transcript-loading-changed", changed);
 
-  for (const [index, response] of [first, second].entries()) {
+  for (const [index, response] of responses.entries()) {
     const loading = loadChatHistory(state);
     expect(pane.transcriptLoading).toBe(true);
     expect(changed).toHaveBeenCalledTimes(index * 2 + 1);
     if (index === 0) {
-      // Coalescing the same in-flight read is not a loading edge.
       void loadChatHistory(state);
       expect(changed).toHaveBeenCalledOnce();
     }

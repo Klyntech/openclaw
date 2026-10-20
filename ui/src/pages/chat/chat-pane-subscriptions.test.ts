@@ -1,6 +1,5 @@
 /* @vitest-environment jsdom */
 
-import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { ApplicationContext } from "../../app/context.ts";
@@ -151,21 +150,30 @@ function observeRender<T>(pane: TestChatPane, read: () => T) {
     return { layout: null, capabilityDialogs: undefined, providerReviewSource: undefined };
   });
   pane.render = render;
+  const settle = async () => {
+    await Promise.resolve();
+    flush();
+  };
   return {
     rendered,
     render,
-    async expectParkedUpdate(change: () => void, expected: T) {
-      pane.presented = false;
-      await Promise.resolve();
-      flush();
-      render.mockClear();
+    async expectUpdate(change: () => void, expected: T, parked = false) {
+      if (parked) {
+        pane.presented = false;
+        await settle();
+        render.mockClear();
+      }
       change();
-      await Promise.resolve();
-      flush();
-      expect(render).not.toHaveBeenCalled();
-      pane.presented = true;
-      await pane.updateComplete;
-      expect(rendered.at(-1)).toBe(expected);
+      expect(read()).toBe(expected);
+      if (parked) {
+        await settle();
+        expect(render).not.toHaveBeenCalled();
+        pane.presented = true;
+        await pane.updateComplete;
+        expect(rendered.at(-1)).toBe(expected);
+      } else {
+        await waitForSolid(() => expect(rendered.at(-1)).toBe(expected));
+      }
     },
   };
 }
@@ -175,18 +183,15 @@ it("projects composer capability changes and catches up a parked pane on reveal"
   const { pane } = fixture;
   const capabilities = getPaneTestRuntime(pane).composerCapabilities;
   const view = () => capabilities.dialogView(pane.context, pane.state, undefined);
-  const { rendered, render, expectParkedUpdate } = observeRender(pane, () => view().open);
+  const { render, expectUpdate } = observeRender(pane, () => view().open);
   fixture.mount("main");
   await pane.updateComplete;
 
-  capabilities.props(pane.context, pane.state, undefined, "main").onAddServer?.();
-  expect(view().open).toBe(true);
-  await waitForSolid(() => expect(rendered.at(-1)).toBe(true));
-
-  await expectParkedUpdate(() => {
-    view().onCancel();
-    expect(view().open).toBe(false);
-  }, false);
+  await expectUpdate(
+    () => capabilities.props(pane.context, pane.state, undefined, "main").onAddServer?.(),
+    true,
+  );
+  await expectUpdate(() => view().onCancel(), false, true);
 
   const state = pane.state;
   const reopen = capabilities.props(pane.context, state, undefined, "main").onAddServer;
@@ -233,11 +238,9 @@ it("updates native locality synchronously and catches up parked panes on reveal"
     snapshot = { ...snapshot, currentId };
     listeners.forEach((listener) => listener(snapshot));
   };
-  const { pane } = createTestChatPane({
-    client: createGatewayBrowserClientFixture(),
-  });
+  const { pane } = createTestChatPane({ client: createGatewayBrowserClientFixture() });
   const file = { path: "file.ts", root: "/workspace" };
-  const { rendered, expectParkedUpdate } = observeRender(pane, () => localEditorFilePath(file));
+  const { rendered, expectUpdate } = observeRender(pane, () => localEditorFilePath(file));
   onTestFinished(() => {
     pane.disconnectedCallback();
     native.capability = null;
@@ -246,14 +249,8 @@ it("updates native locality synchronously and catches up parked panes on reveal"
   await pane.updateComplete;
   expect(rendered.at(-1)).toBe("/workspace/file.ts");
 
-  publish("remote");
-  expect(localEditorFilePath(file)).toBeNull();
-  await waitForSolid(() => expect(rendered.at(-1)).toBeNull());
-
-  await expectParkedUpdate(() => {
-    publish("local");
-    expect(localEditorFilePath(file)).toBe("/workspace/file.ts");
-  }, "/workspace/file.ts");
+  await expectUpdate(() => publish("remote"), null);
+  await expectUpdate(() => publish("local"), "/workspace/file.ts", true);
 
   pane.disconnectedCallback();
   expect(listeners.size).toBe(0);
@@ -264,9 +261,7 @@ it("updates native locality synchronously and catches up parked panes on reveal"
 });
 
 it("parks and remounts presentation subscriptions using the runtime's context without a provider", async () => {
-  const { pane } = createTestChatPane({
-    client: createGatewayBrowserClientFixture(),
-  });
+  const { pane } = createTestChatPane({ client: createGatewayBrowserClientFixture() });
   const navigation = pane.context.navigation;
   const subscribe = navigation.subscribe.bind(navigation);
   const released = vi.fn();
@@ -278,7 +273,7 @@ it("parks and remounts presentation subscriptions using the runtime's context wi
     };
   });
   const pluginSubscriptions = vi.spyOn(pane.context.plugins, "subscribe");
-  const { rendered, render, expectParkedUpdate } = observeRender(
+  const { rendered, render, expectUpdate } = observeRender(
     pane,
     () => navigation.snapshot.navCollapsed,
   );
@@ -291,9 +286,8 @@ it("parks and remounts presentation subscriptions using the runtime's context wi
   expect(subscriptions).toHaveBeenCalledOnce();
   expect(pluginSubscriptions).toHaveBeenCalledOnce();
 
-  navigation.update({ navCollapsed: true });
-  await waitForSolid(() => expect(rendered.at(-1)).toBe(true));
-  await expectParkedUpdate(() => navigation.update({ navCollapsed: false }), false);
+  await expectUpdate(() => navigation.update({ navCollapsed: true }), true);
+  await expectUpdate(() => navigation.update({ navCollapsed: false }), false, true);
 
   pane.disconnectedCallback();
   expect(released).toHaveBeenCalledTimes(subscriptions.mock.calls.length);
@@ -323,9 +317,9 @@ it("retires auth presentation once per event and releases the Gateway listener o
   const pane = fixture.mount(key);
   const ready = async () => {
     await pane.updateComplete;
-    await waitForSolid(() => {
-      expect(pane.state).toMatchObject({ connected: true, chatLoading: false });
-    });
+    await waitForSolid(() =>
+      expect(pane.state).toMatchObject({ connected: true, chatLoading: false }),
+    );
   };
   await ready();
 
@@ -342,7 +336,7 @@ it("retires auth presentation once per event and releases the Gateway listener o
     expect(state.modelAuthStatusResult).toBeNull();
     expect(state.modelAuthStatusRequestVersion).toBe(version + 1);
     await waitForSolid(() => expect(state.modelAuthStatusResult).toEqual(authStatus));
-    const settled = expectDefined(state.modelAuthStatusResult, "settled auth presentation");
+    const settled = state.modelAuthStatusResult;
     const settledVersion = state.modelAuthStatusRequestVersion;
     pane.disconnectedCallback();
     fixture.emitGatewayEvent("chat.metadata.changed", { authChanged: true });

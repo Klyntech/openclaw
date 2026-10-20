@@ -3,7 +3,6 @@
 import { flush } from "solid-js";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { decodeResumeHandoff } from "../../../../src/shared/resume-handoff.js";
-import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { GatewaySessionRow } from "../../api/types.ts";
 import { openChatLayoutMenu } from "../../test-helpers/chat-layout-menu.ts";
 import { gatewayHelloForMethods as desktopHello } from "../../test-helpers/gateway-methods.ts";
@@ -11,6 +10,7 @@ import { waitForSolid } from "../../test-helpers/solid-settle.ts";
 import {
   activePlacementSession,
   createPaneHeaderWorkspaceFixture,
+  createGatewayBrowserClientFixture as gateway,
   createSessionCapabilityFixture,
   createTestChatPane,
 } from "./chat-pane.test-support.ts";
@@ -44,9 +44,7 @@ function directSession(key: string, agentId?: string): GatewaySessionRow {
   return { key, agentId, kind: "direct", updatedAt: 0 };
 }
 
-function createTerminalPane(
-  client: GatewayBrowserClient = { request: vi.fn() } as unknown as GatewayBrowserClient,
-) {
+function createTerminalPane(client = gateway()) {
   const { pane, state } = createTestChatPane({
     client,
     sessions: createSessionCapabilityFixture(),
@@ -76,7 +74,7 @@ function createTerminalPane(
 it.each(["session", "owner", "target", "client", "reconnect"] as const)(
   "closes terminal continuation after a %s ownership change",
   async (change) => {
-    const client = { gatewayUrl: "wss://gateway.example/control" } as GatewayBrowserClient;
+    const client = gateway({ gatewayUrl: "wss://gateway.example/control" });
     const { pane, container, paint } = createTerminalPane(client);
     const row = directSession("bare-session", "row-agent");
 
@@ -99,9 +97,9 @@ it.each(["session", "owner", "target", "client", "reconnect"] as const)(
       paint(row);
       pane.context.gateway.connection.gatewayUrl = "ws://example.test";
     } else if (change === "client") {
-      pane.context.gateway.snapshot.client = {
+      pane.context.gateway.snapshot.client = gateway({
         gatewayUrl: "wss://replacement.example/control",
-      } as GatewayBrowserClient;
+      });
       paint(row);
       pane.context.gateway.snapshot.client = client;
     } else if (change === "reconnect") {
@@ -119,9 +117,9 @@ it.each(["session", "owner", "target", "client", "reconnect"] as const)(
 );
 
 it("disables terminal continuation with query-specific guidance", () => {
-  const client = {
+  const client = gateway({
     gatewayUrl: "wss://gateway.example/control?route=alpha",
-  } as GatewayBrowserClient;
+  });
   const { container, paint } = createTerminalPane(client);
   const row = directSession("main", "alpha");
   paint(row);
@@ -188,21 +186,19 @@ it("exposes Desktop as a side-panel action only for observable session targets",
   for (const placement of [
     { state: "requested" },
     { state: "reclaimed", environmentId: "former-worker" },
+    undefined,
   ]) {
-    renderDesktopHeader({
-      ...localSession,
-      execNode: "must-not-fall-back",
-      placement: placement as GatewaySessionRow["placement"],
-    });
+    renderDesktopHeader(
+      placement && {
+        ...localSession,
+        execNode: "must-not-fall-back",
+        placement: placement as GatewaySessionRow["placement"],
+      },
+    );
     await openPanelMenu(container);
     expect(topButton("Toggle desktop panel")).toBeNull();
     expect(panelActionIds()).not.toContain("desktop");
   }
-
-  renderDesktopHeader(undefined);
-  await openPanelMenu(container);
-  expect(topButton("Toggle desktop panel")).toBeNull();
-  expect(panelActionIds()).not.toContain("desktop");
 
   snapshot.hello = desktopHello(["desktop.observe"], ["operator.read"]);
   renderDesktopHeader(localSession);

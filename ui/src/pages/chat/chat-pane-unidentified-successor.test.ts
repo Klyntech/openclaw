@@ -8,14 +8,11 @@ import { sessionsResult } from "../../lib/sessions/session-capability.test-suppo
 import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
 import { createMountedPanes, refreshPane } from "./chat-pane-mounted.test-support.ts";
 import { selectedChatSessionRow } from "./chat-state-route.ts";
-import {
-  installTranscriptDomMocks,
-  resetTranscriptTestDom,
-} from "./components/chat-transcript.test-support.ts";
+import * as transcriptDom from "./components/chat-transcript.test-support.ts";
 import { getChatSessionProjection, reduceChatSessionProjection } from "./history-merge.ts";
 
-beforeEach(installTranscriptDomMocks);
-afterEach(resetTranscriptTestDom);
+beforeEach(transcriptDom.installTranscriptDomMocks);
+afterEach(transcriptDom.resetTranscriptTestDom);
 
 function makeMessage(id: string, seq: number, idempotencyKey?: string) {
   return {
@@ -42,23 +39,17 @@ it.each(
       updatedAt: 1,
     };
     const successor = { ...previous, sessionId: "successor-session", updatedAt: 2 };
-    const predecessorMessage = makeMessage("predecessor-live", 1);
-    const nextPredecessorMessage = makeMessage("predecessor-live-next", 2);
+    const predecessors = [1, 2].map((seq) => makeMessage(`predecessor-${seq}`, seq));
     const successorMessage = makeMessage("successor-live", 1, "initial-send:user");
-    const predecessorMessages = [predecessorMessage, nextPredecessorMessage].map((item) =>
-      expect.objectContaining(item),
-    );
+    const expectedMessages = predecessors.map((item) => expect.objectContaining(item));
     const initialHistory = createDeferred<ChatHistoryResult>();
     void initialHistory.promise.catch(() => undefined);
     const historyEntered = createDeferred();
     const successorHistory = createDeferred<ChatHistoryResult>();
-    let successorExists = false;
+    let currentHistory = initialHistory.promise;
     const history = () => {
-      if (successorExists) {
-        return successorHistory.promise;
-      }
       historyEntered.resolve();
-      return initialHistory.promise;
+      return currentHistory;
     };
     let listedRows: GatewaySessionRow[] = [];
     const responses = {
@@ -68,7 +59,7 @@ it.each(
     };
     const fixture = createMountedPanes([previous], "main", undefined, responses);
     const { sessions, mount, emitGatewayEvent } = fixture;
-    const emitMessage = (row: GatewaySessionRow, message: typeof predecessorMessage) =>
+    const emitMessage = (row: GatewaySessionRow, message: ReturnType<typeof makeMessage>) =>
       emitGatewayEvent("session.message", {
         sessionKey: row.key,
         agentId: "main",
@@ -86,18 +77,16 @@ it.each(
       const { state } = pane;
       reading = refreshPane(pane);
       await historyEntered.promise;
-      // A separate scoped metadata read may finish before the transcript request.
-      expect(sessions.captureReconcile()(previous, undefined, { resultAgentId: "main" })).toBe(
-        true,
-      );
+      const reconcile = sessions.captureReconcile();
+      expect(reconcile(previous, undefined, { resultAgentId: "main" })).toBe(true);
       expect(selectedChatSessionRow(state)).toMatchObject(previous);
       expect(state.currentSessionId ?? null).toBeNull();
 
       if (transcript === "live predecessor") {
-        emitMessage(previous, predecessorMessage);
-        // Existing live content must not block the next same-incarnation message.
-        emitMessage(previous, nextPredecessorMessage);
-        expect(state.chatMessages).toEqual(predecessorMessages);
+        for (const message of predecessors) {
+          emitMessage(previous, message);
+        }
+        expect(state.chatMessages).toEqual(expectedMessages);
       } else if (transcript === "live stream") {
         const text = "Predecessor is still working.";
         emitGatewayEvent("chat", {
@@ -116,20 +105,17 @@ it.each(
           type: "sendPending",
           runId: "initial-send",
           message: {
-            role: "user",
-            content: successorMessage.content,
+            ...successorMessage,
             __openclaw: { idempotencyKey: "initial-send:user" },
           },
         });
-        expect(getChatSessionProjection(state).entries).toEqual([
-          expect.objectContaining({ pending: true }),
-        ]);
+        expect(getChatSessionProjection(state)).toMatchObject({ entries: [{ pending: true }] });
       } else {
         expect(state.chatMessages).toEqual([]);
       }
       expect(state.currentSessionId ?? null).toBeNull();
       const { chatMessages: displayed, chatRunId: activeRun, chatStream: stream } = state;
-      successorExists = true;
+      currentHistory = successorHistory.promise;
       if (admission === "list") {
         listedRows = [successor];
         await sessions.refresh({ agentId: "main", force: true });
@@ -142,7 +128,7 @@ it.each(
         expect.soft(state.chatMessages).toBe(displayed);
         expect.soft(state).toMatchObject({ chatRunId: activeRun, chatStream: stream });
         expect(state.chatMessages).toEqual(
-          transcript === "live predecessor" ? predecessorMessages : [],
+          transcript === "live predecessor" ? expectedMessages : [],
         );
       } else {
         expect(state.chatMessages).toEqual([expect.objectContaining(successorMessage)]);
