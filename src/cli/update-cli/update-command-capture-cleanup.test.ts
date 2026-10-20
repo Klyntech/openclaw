@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import type { RecoveryCleanupReport } from "../../commands/doctor-session-sqlite-recovery-inventory.js";
 import { resolveUpdateCaptureRoot } from "../../infra/update-capture-paths.js";
 import {
   UPDATE_CAPTURE_PRIVACY_MARKER,
@@ -97,46 +96,80 @@ async function runCleanup(options: { dryRun?: boolean; yes?: boolean }) {
   const exit = vi.spyOn(defaultRuntime, "exit").mockImplementation(() => undefined as never);
   await updateCleanupCommand({ ...options, json: true });
   expect(exit).not.toHaveBeenCalled();
-  const report = writeJson.mock.calls.at(-1)?.[0] as RecoveryCleanupReport;
+  const report = writeJson.mock.calls.at(-1)?.[0] as {
+    status: string;
+    artifacts: Array<{
+      kind?: string;
+      path: string;
+      outcome: string;
+      reason: string;
+      bytes: number;
+    }>;
+  };
   return {
     status: report.status,
     captures: Object.fromEntries(
       report.artifacts
         .filter((item) => item.kind === "update-capture")
-        .map(({ path: directory, outcome, reason, bytes }) => [
-          directory,
-          { outcome, reason, bytes },
+        .map((item) => [
+          item.path,
+          { outcome: item.outcome, reason: item.reason, bytes: item.bytes },
         ]),
     ),
   };
 }
 
-const expectedPreview = (captures: Record<string, string>) =>
-  Object.fromEntries(
-    (
-      [
-        ["superseded", "candidate", "superseded-update-capture", 1038],
-        ["unsealed", "candidate", "unsealed-update-capture", 1035],
-        ["alreadyCurrent", "candidate", "superseded-update-capture", 1038],
-        ["failedBaseline", "protected", "unresolved-failed-update", 1038],
-        ["latest", "protected", "awaiting-later-completed-update", 1035],
-        ["unfinished", "protected", "unfinished-update-run", 1038],
-        ["unattributed", "protected", "unmanifested-update-capture", 1038],
-        ["unmarked", "protected", "unmanifested-update-capture", 1003],
-      ] as const
-    ).map(
-      ([label, outcome, reason, bytes]) => [captures[label], { outcome, reason, bytes }] as const,
-    ),
-  );
+const expectedPreview = (captures: Record<string, string>) => ({
+  [captures.superseded!]: {
+    outcome: "candidate",
+    reason: "superseded-update-capture",
+    bytes: 1038,
+  },
+  [captures.unsealed!]: { outcome: "candidate", reason: "unsealed-update-capture", bytes: 1035 },
+  [captures.alreadyCurrent!]: {
+    outcome: "candidate",
+    reason: "superseded-update-capture",
+    bytes: 1038,
+  },
+  [captures.failedBaseline!]: {
+    outcome: "protected",
+    reason: "unresolved-failed-update",
+    bytes: 1038,
+  },
+  [captures.latest!]: {
+    outcome: "protected",
+    reason: "awaiting-later-completed-update",
+    bytes: 1035,
+  },
+  [captures.unfinished!]: { outcome: "protected", reason: "unfinished-update-run", bytes: 1038 },
+  [captures.unattributed!]: {
+    outcome: "protected",
+    reason: "unmanifested-update-capture",
+    bytes: 1038,
+  },
+  [captures.unmarked!]: {
+    outcome: "protected",
+    reason: "unmanifested-update-capture",
+    bytes: 1003,
+  },
+});
 
-it.each([
-  ["current", true],
-  ["current", false],
-  ["pre-migration", true],
-  ["pre-migration", false],
-] as const)(
-  "classifies %s captures and removes only candidates (dry-run=%s)",
-  async (location, dryRun) => {
+it.each(["current", "pre-migration"] as const)(
+  "previews %s update captures with their classification and bytes without removing them",
+  async (location) => {
+    await withCaptureHistory(async (captures) => {
+      const preview = await runCleanup({ dryRun: true });
+      expect(preview).toEqual({ status: "preview", captures: expectedPreview(captures) });
+      for (const directory of Object.values(captures)) {
+        expect(fs.existsSync(directory)).toBe(true);
+      }
+    }, location);
+  },
+);
+
+it.each(["current", "pre-migration"] as const)(
+  "removes only %s candidate captures and keeps protected captures",
+  async (location) => {
     await withCaptureHistory(async (captures, root) => {
       using stderr = vi.spyOn(process.stderr, "write").mockImplementation((text) => {
         if (!String(text).startsWith("Removing capture ")) {
@@ -147,30 +180,26 @@ it.each([
         expect(fs.existsSync(directory!)).toBe(true);
         return true;
       });
-      const result = await runCleanup({ dryRun, yes: !dryRun });
+      const result = await runCleanup({ yes: true });
+      expect(result.status).toBe("complete");
       const progress = stderr.mock.calls
         .map(([text]) => String(text))
         .filter((text) => text.startsWith("Removing capture "));
-      expect(progress).toHaveLength(dryRun ? 0 : 3);
+      expect(progress).toHaveLength(3);
       for (const [index, text] of progress.entries()) {
         expect(text).toMatch(
           new RegExp(`^Removing capture ${index + 1}/3: .+ \\(103[58] bytes\\)\\n$`),
         );
       }
-      const expected = Object.entries(expectedPreview(captures)).map(([directory, item]) => {
-        const remove = !dryRun && item.outcome === "candidate";
-        expect(fs.existsSync(directory)).toBe(!remove);
-        return [
-          directory,
-          remove
+      const preview = expectedPreview(captures);
+      for (const [directory, item] of Object.entries(preview)) {
+        expect(result.captures[directory]).toEqual(
+          item.outcome === "candidate"
             ? { outcome: "removed", reason: "update-capture-retired", bytes: item.bytes }
             : item,
-        ];
-      });
-      expect(result).toEqual({
-        status: dryRun ? "preview" : "complete",
-        captures: Object.fromEntries(expected),
-      });
+        );
+        expect(fs.existsSync(directory)).toBe(item.outcome !== "candidate");
+      }
       expect(fs.existsSync(path.join(root, UPDATE_CAPTURE_PRIVACY_MARKER))).toBe(true);
     }, location);
   },
@@ -181,29 +210,37 @@ it.each(["current", "pre-migration"] as const)(
   async (location) => {
     await withCaptureHistory(async (_captures, root) => {
       const now = Date.now();
-      const configPath = path.join(root, "config.json");
       const doctors = [5, 4, 3, 2, 1].map((age) => {
         const runId = `doctor-${randomUUID()}`;
         const directory = writeCapture(root, runId, true);
-        const manifest = {
-          schemaVersion: 2,
-          kind: "update-recovery",
-          generation: { kind: "baseline" },
-          databases: [],
-          runId,
-          installRoot: root,
-          stateDir: path.dirname(root),
-          configPath,
-          configPaths: [configPath],
-          creator: { host: "fixture", pid: 1, startIdentity: "1" },
-          drivers: [],
-          createdAt: new Date(now - age * 86_400_000).toISOString(),
-          roots: [configPath],
-          excludedRoots: [],
-          protectedPaths: [configPath],
-          entries: [{ kind: "missing", sourcePath: configPath, sqlite: false, directory: false }],
-        };
-        fs.writeFileSync(path.join(directory, "manifest.json"), JSON.stringify(manifest));
+        fs.writeFileSync(
+          path.join(directory, "manifest.json"),
+          JSON.stringify({
+            schemaVersion: 2,
+            kind: "update-recovery",
+            generation: { kind: "baseline" },
+            databases: [],
+            runId,
+            installRoot: root,
+            stateDir: path.dirname(root),
+            configPath: path.join(root, "config.json"),
+            configPaths: [path.join(root, "config.json")],
+            creator: { host: "fixture", pid: 1, startIdentity: "1" },
+            drivers: [],
+            createdAt: new Date(now - age * 86_400_000).toISOString(),
+            roots: [path.join(root, "config.json")],
+            excludedRoots: [],
+            protectedPaths: [path.join(root, "config.json")],
+            entries: [
+              {
+                kind: "missing",
+                sourcePath: path.join(root, "config.json"),
+                sqlite: false,
+                directory: false,
+              },
+            ],
+          }),
+        );
         return directory;
       });
       const preview = await runCleanup({ dryRun: true });
@@ -216,7 +253,13 @@ it.each(["current", "pre-migration"] as const)(
         expect(fs.existsSync(directory)).toBe(true);
       }
       await runCleanup({ yes: true });
-      expect(doctors.map(fs.existsSync)).toEqual([false, false, true, true, true]);
+      expect(doctors.map((directory) => fs.existsSync(directory))).toEqual([
+        false,
+        false,
+        true,
+        true,
+        true,
+      ]);
     }, location);
   },
 );
