@@ -1,4 +1,3 @@
-// Covers state-directory dotenv discovery, parsing, and merge behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,14 +16,20 @@ describe("readStateDirDotEnvFromStateDir", () => {
     logWarnSpy.mockClear();
   });
 
-  async function withDotEnv<T>(content: string, run: (dir: string) => T | Promise<T>): Promise<T> {
+  async function withDir<T>(run: (dir: string) => T | Promise<T>): Promise<T> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dotenv-test-"));
-    await fs.writeFile(path.join(dir, ".env"), content, "utf8");
     try {
       return await run(dir);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  }
+
+  async function readEntries(content: string) {
+    return withDir(async (dir) => {
+      await fs.writeFile(path.join(dir, ".env"), content, "utf8");
+      return readStateDirDotEnvFromStateDir(dir).entries;
+    });
   }
 
   it("skips values that are unresolved shell variable references", async () => {
@@ -43,10 +48,7 @@ describe("readStateDirDotEnvFromStateDir", () => {
       "REAL_KEY=actual_value_here",
     ].join("\n");
 
-    await withDotEnv(content, async (dir) => {
-      const result = readStateDirDotEnvFromStateDir(dir).entries;
-      expect(result).toEqual({ REAL_KEY: "actual_value_here" });
-    });
+    expect(await readEntries(content)).toEqual({ REAL_KEY: "actual_value_here" });
   });
 
   it("preserves credential values that merely contain a dollar sign", async () => {
@@ -62,45 +64,36 @@ describe("readStateDirDotEnvFromStateDir", () => {
       "PURE_REF=$SOME_VAR",
     ].join("\n");
 
-    await withDotEnv(content, async (dir) => {
-      const result = readStateDirDotEnvFromStateDir(dir).entries;
-      expect(result["PASSWORD"]).toBe("abc$2!xyz");
-      expect(result["TOKEN"]).toBe("tok_$prod_v2");
-      expect(result["PRICE"]).toBe("\\$100");
-      expect(result["QUOTED_PASSWORD"]).toBe('"abc$2!xyz"');
-      expect(result["QUOTED_PRICE"]).toBe('"$100"');
-      expect(result["LEADING_DOLLAR_PASSWORD"]).toBe("$ecret123");
-      expect(result["LEADING_DOLLAR_TOKEN"]).toBe("$token_1");
-      expect(result["LOWERCASE_BRACE"]).toBe("${lowercase_literal}");
-      expect(Object.keys(result)).not.toContain("PURE_REF");
+    expect(await readEntries(content)).toEqual({
+      PASSWORD: "abc$2!xyz",
+      TOKEN: "tok_$prod_v2",
+      PRICE: "\\$100",
+      QUOTED_PASSWORD: '"abc$2!xyz"',
+      QUOTED_PRICE: '"$100"',
+      LEADING_DOLLAR_PASSWORD: "$ecret123",
+      LEADING_DOLLAR_TOKEN: "$token_1",
+      LOWERCASE_BRACE: "${lowercase_literal}",
     });
   });
 
   it("returns empty object when .env is missing", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dotenv-missing-"));
-    try {
+    await withDir((dir) => {
       expect(readStateDirDotEnvFromStateDir(dir).entries).toEqual({});
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it("reads a symlinked .env file", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dotenv-symlink-"));
-    try {
+    await withDir(async (dir) => {
       const realPath = path.join(dir, "real.env");
       await fs.writeFile(realPath, "REAL_KEY=from_symlink_target\n", "utf8");
       await fs.symlink(realPath, path.join(dir, ".env"));
       const result = readStateDirDotEnvFromStateDir(dir).entries;
       expect(result["REAL_KEY"]).toBe("from_symlink_target");
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it("warns when an oversized .env is skipped", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dotenv-oversized-"));
-    try {
+    await withDir(async (dir) => {
       const large = Buffer.alloc(2 * 1024 * 1024, "x");
       large.write("KEY=value\n", 0, "utf8");
       await fs.writeFile(path.join(dir, ".env"), large);
@@ -109,8 +102,6 @@ describe("readStateDirDotEnvFromStateDir", () => {
       expect(logWarnSpy).toHaveBeenCalledWith(
         expect.stringContaining("skipping oversized state-directory .env file"),
       );
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

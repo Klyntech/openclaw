@@ -11,28 +11,18 @@ type MixedUnion = {
   literals: unknown[];
 };
 
-function pathKey(path: string[]): string {
-  return path.join(".");
+function branches(schema: JsonSchema): JsonSchema[] {
+  return [...(schema.allOf ?? []), ...(schema.anyOf ?? []), ...(schema.oneOf ?? [])];
 }
 
-function unionLiterals(schema: JsonSchema): unknown[] {
-  const union = schema.anyOf ?? schema.oneOf;
-  if (!union) {
-    return [];
+function literalValues(schema: JsonSchema): unknown[] | undefined {
+  if (Array.isArray(schema.enum)) {
+    return schema.enum;
   }
-  return union.flatMap((entry) => {
-    if (Array.isArray(entry.enum)) {
-      return entry.enum;
-    }
-    if (Object.hasOwn(entry, "const")) {
-      return [entry.const];
-    }
-    return entry.type === "null" ? [null] : [];
-  });
-}
-
-function isLiteralOnlyBranch(schema: JsonSchema): boolean {
-  return Array.isArray(schema.enum) || Object.hasOwn(schema, "const") || schema.type === "null";
+  if (Object.hasOwn(schema, "const")) {
+    return [schema.const];
+  }
+  return schema.type === "null" ? [null] : undefined;
 }
 
 function collectMixedUnions(
@@ -41,9 +31,10 @@ function collectMixedUnions(
   result: MixedUnion[] = [],
 ): MixedUnion[] {
   const union = schema.anyOf ?? schema.oneOf;
-  const literals = unionLiterals(schema);
-  if (union && literals.length > 0 && union.some((entry) => !isLiteralOnlyBranch(entry))) {
-    result.push({ path: pathKey(path) || "<root>", schema, literals });
+  const values = union?.map(literalValues) ?? [];
+  const literals = values.flatMap((value) => value ?? []);
+  if (literals.length > 0 && values.includes(undefined)) {
+    result.push({ path: path.join(".") || "<root>", schema, literals });
   }
 
   for (const [key, child] of Object.entries(schema.properties ?? {})) {
@@ -58,11 +49,7 @@ function collectMixedUnions(
   if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
     collectMixedUnions(schema.additionalProperties, [...path, "*"], result);
   }
-  for (const branch of [
-    ...(schema.allOf ?? []),
-    ...(schema.anyOf ?? []),
-    ...(schema.oneOf ?? []),
-  ]) {
+  for (const branch of branches(schema)) {
     collectMixedUnions(branch, path, result);
   }
   return result;
@@ -85,11 +72,7 @@ function schemaChildAtSegment(schema: JsonSchema, segment: string): JsonSchema |
   if (direct) {
     return direct;
   }
-  for (const branch of [
-    ...(schema.allOf ?? []),
-    ...(schema.anyOf ?? []),
-    ...(schema.oneOf ?? []),
-  ]) {
+  for (const branch of branches(schema)) {
     const nested = schemaChildAtSegment(branch, segment);
     if (nested) {
       return nested;
@@ -99,14 +82,10 @@ function schemaChildAtSegment(schema: JsonSchema, segment: string): JsonSchema |
 }
 
 function schemaAtPath(schema: JsonSchema, path: string): JsonSchema | undefined {
-  let current: JsonSchema | undefined = schema;
-  for (const segment of path === "<root>" ? [] : path.split(".")) {
-    if (!current) {
-      return undefined;
-    }
-    current = schemaChildAtSegment(current, segment);
-  }
-  return current;
+  return (path === "<root>" ? [] : path.split(".")).reduce<JsonSchema | undefined>(
+    (current, segment) => current && schemaChildAtSegment(current, segment),
+    schema,
+  );
 }
 
 function isPathUnsupported(path: string, unsupportedPaths: string[]): boolean {
@@ -119,11 +98,16 @@ function isPathUnsupported(path: string, unsupportedPaths: string[]): boolean {
 }
 
 describe("generated config schema Control UI contract", () => {
-  it("never drops accepted literals from mixed unions", () => {
+  function analyze() {
     const rawSchema = computeBaseConfigSchemaResponse({
       generatedAt: "control-ui-contract",
     }).schema as JsonSchema;
-    const analysis = analyzeConfigSchema(rawSchema);
+    return { rawSchema, ...analyzeConfigSchema(rawSchema) };
+  }
+
+  it("never drops accepted literals from mixed unions", () => {
+    const analysis = analyze();
+    const { rawSchema } = analysis;
     const mixedUnions = collectMixedUnions(rawSchema);
 
     expect(mixedUnions.length).toBeGreaterThan(0);
@@ -144,10 +128,7 @@ describe("generated config schema Control UI contract", () => {
   });
 
   it("keeps native command settings editable as tri-state controls", () => {
-    const rawSchema = computeBaseConfigSchemaResponse({
-      generatedAt: "control-ui-contract",
-    }).schema as JsonSchema;
-    const analysis = analyzeConfigSchema(rawSchema);
+    const analysis = analyze();
 
     for (const path of ["commands.native", "commands.nativeSkills"]) {
       expect(isPathUnsupported(path, analysis.unsupportedPaths)).toBe(false);

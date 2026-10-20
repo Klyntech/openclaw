@@ -14,6 +14,16 @@ import {
 import type { OpenClawConfig } from "./types.openclaw.js";
 
 const unregister: Array<() => void> = [];
+const sidebar = (): OpenClawConfig => ({ ui: { prefs: { sidebarEntries: ["sessions"] } } });
+const identity = (): OpenClawConfig => ({
+  agents: { entries: { main: { identity: { name: "Renamed" } } } },
+});
+function watchChanges() {
+  const changes = vi.fn();
+  unregister.push(sessionChanges.subscribe(changes));
+  return changes;
+}
+const modelKey = () => resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!);
 
 afterEach(() => {
   unregister.splice(0).forEach((release) => release());
@@ -22,42 +32,17 @@ afterEach(() => {
 });
 
 it.each<[string, OpenClawConfig, string, boolean]>([
-  [
-    "sidebar preferences",
-    { ui: { prefs: { sidebarEntries: ["sessions"] } } },
-    "config-presentation",
-    false,
-  ],
-  [
-    "agent identity",
-    { agents: { entries: { main: { identity: { name: "Renamed" } } } } },
-    "config-profiles",
-    false,
-  ],
-  [
-    "authored sidebar preferences",
-    { ui: { prefs: { sidebarEntries: ["sessions"] } } },
-    "config-presentation",
-    true,
-  ],
-  [
-    "authored agent identity",
-    { agents: { entries: { main: { identity: { name: "Renamed" } } } } },
-    "config-profiles",
-    true,
-  ],
+  ["sidebar preferences", sidebar(), "config-presentation", false],
+  ["agent identity", identity(), "config-profiles", false],
+  ["authored sidebar preferences", sidebar(), "config-presentation", true],
+  ["authored agent identity", identity(), "config-profiles", true],
 ])("publishes the projection impact of %s", (_label, change, scope, authored) => {
   const initial: OpenClawConfig = { agents: { entries: { main: {} } } };
   setRuntimeConfigSnapshot(initial, authored ? structuredClone(initial) : undefined);
-  const published = vi.fn();
-  const stop = sessionChanges.subscribe(published);
-  try {
-    const next = { ...initial, ...change };
-    setRuntimeConfigSnapshot(next, authored ? structuredClone(next) : undefined);
-    expect(published).toHaveBeenCalledExactlyOnceWith({ all: true, scope });
-  } finally {
-    stop();
-  }
+  const published = watchChanges();
+  const next = { ...initial, ...change };
+  setRuntimeConfigSnapshot(next, authored ? structuredClone(next) : undefined);
+  expect(published).toHaveBeenCalledExactlyOnceWith({ all: true, scope });
 });
 
 it("reuses publication hashes and model keys across equal mutable fleet clones", () => {
@@ -80,11 +65,11 @@ it("reuses publication hashes and model keys across equal mutable fleet clones",
     const first = publications[0]!;
     setRuntimeConfigSnapshot(first.config, first.source);
     const metadata = getRuntimeConfigSnapshotMetadata();
-    const modelKey = resolveRuntimeModelConfigCacheKey(first.config);
+    const firstModelKey = resolveRuntimeModelConfigCacheKey(first.config);
     for (const { config, source } of publications.slice(1)) {
       setRuntimeConfigSnapshot(config, source);
       expect(getRuntimeConfigSnapshotMetadata()).toBe(metadata);
-      expect(resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!)).toBe(modelKey);
+      expect(resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!)).toBe(firstModelKey);
     }
     expect(keys.mock.calls.filter(([value]) => rosters.has(value))).toHaveLength(4);
     expect(getRuntimeConfigSnapshot()).toBe(first.config);
@@ -122,12 +107,8 @@ it.each(["null prototype", "symbol key"])(
       Object.assign(initial, { [Symbol("fixture")]: true });
     }
     setRuntimeConfigSnapshot(initial);
-    const changes = vi.fn();
-    unregister.push(sessionChanges.subscribe(changes));
-    setRuntimeConfigSnapshot({
-      ...initial,
-      ui: { prefs: { sidebarEntries: ["sessions"] } },
-    });
+    const changes = watchChanges();
+    setRuntimeConfigSnapshot({ ...initial, ...sidebar() });
     expect(changes).toHaveBeenCalledExactlyOnceWith({ all: true, scope: "config-presentation" });
   },
 );
@@ -141,17 +122,14 @@ it.each(["added", "replaced", "removed"])(
     const nextSource = change === "removed" ? undefined : enabled;
     setRuntimeConfigSnapshot({}, initialSource);
     const previousRevision = getRuntimeConfigSnapshotMetadata()!.revision;
-    const previousModelKey = resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!);
-    const changes = vi.fn();
-    unregister.push(sessionChanges.subscribe(changes));
+    const previousModelKey = modelKey();
+    const changes = watchChanges();
 
     setRuntimeConfigSnapshot({}, nextSource);
 
     expect(getRuntimeConfigSourceSnapshot()).toBe(nextSource ?? null);
     expect(getRuntimeConfigSnapshotMetadata()!.revision).toBe(previousRevision + 1);
-    expect(resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!)).not.toBe(
-      previousModelKey,
-    );
+    expect(modelKey()).not.toBe(previousModelKey);
     expect(changes).toHaveBeenCalledExactlyOnceWith({ all: true, scope: "config-presentation" });
   },
 );
@@ -161,13 +139,11 @@ it("retains broad authored model-policy invalidation alongside runtime preferenc
     agents: { defaults: { model: { primary: "openai/first" } } },
   };
   setRuntimeConfigSnapshot({}, source);
-  const changes = vi.fn();
-  unregister.push(sessionChanges.subscribe(changes));
+  const changes = watchChanges();
 
-  setRuntimeConfigSnapshot(
-    { ui: { prefs: { sidebarEntries: ["sessions"] } } },
-    { agents: { defaults: { model: { primary: "openai/second" } } } },
-  );
+  setRuntimeConfigSnapshot(sidebar(), {
+    agents: { defaults: { model: { primary: "openai/second" } } },
+  });
 
   expect(changes).toHaveBeenCalledExactlyOnceWith({ all: true, scope: "config" });
 });
@@ -175,8 +151,7 @@ it("retains broad authored model-policy invalidation alongside runtime preferenc
 it("restores captured authored policy after its live source was edited in place", () => {
   const source: OpenClawConfig = { plugins: { enabled: true } };
   setRuntimeConfigSnapshot({}, source);
-  const changes = vi.fn();
-  unregister.push(sessionChanges.subscribe(changes));
+  const changes = watchChanges();
   source.plugins!.enabled = false;
   const restored: OpenClawConfig = { plugins: { enabled: true } };
 
@@ -195,9 +170,8 @@ it.each(["same source", "equal clone", "migration marker"])(
     };
     setRuntimeConfigSnapshot({}, source);
     const metadata = getRuntimeConfigSnapshotMetadata()!;
-    const modelKey = resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!);
-    const changes = vi.fn();
-    unregister.push(sessionChanges.subscribe(changes));
+    const previousModelKey = modelKey();
+    const changes = watchChanges();
     source.meta!.lastTouchedVersion = "2";
     if (change === "migration marker") {
       source.meta!.migrations = { modelPolicyAllowlist: true };
@@ -213,11 +187,11 @@ it.each(["same source", "equal clone", "migration marker"])(
 
     if (change === "migration marker") {
       expect(getRuntimeConfigSourceSnapshot()).toBe(nextSource);
-      expect(resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!)).not.toBe(modelKey);
+      expect(modelKey()).not.toBe(previousModelKey);
       expect(changes).toHaveBeenCalledExactlyOnceWith({ all: true, scope: "config" });
     } else {
       expect(getRuntimeConfigSnapshotMetadata()).toBe(metadata);
-      expect(resolveRuntimeModelConfigCacheKey(getRuntimeConfigSnapshot()!)).toBe(modelKey);
+      expect(modelKey()).toBe(previousModelKey);
       expect(changes).not.toHaveBeenCalled();
     }
   },

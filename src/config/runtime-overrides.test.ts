@@ -1,4 +1,3 @@
-// Covers runtime config overrides and precedence.
 import { beforeEach, describe, expect, it } from "vitest";
 import { listAgentWorkspaceDirs } from "../agents/workspace-dirs.js";
 import {
@@ -18,25 +17,16 @@ describe("runtime overrides", () => {
   });
 
   it("fingerprints the persisted owner of a global fixed store", () => {
-    const cfg = {
+    const routingConfig = (agentId: string) => ({
       session: { scope: "global" as const, store: "/tmp/shared.sqlite" },
       agents: {
         ownership: "explicit" as const,
-        defaults: { sessionStore: { agentId: "ops" } },
+        defaults: { sessionStore: { agentId } },
         entries: { research: {}, ops: {} },
       },
-    };
-
-    expect(resolveSessionRoutingContract(cfg)).toBe("global|main|ops");
-    expect(
-      resolveSessionRoutingContract({
-        ...cfg,
-        agents: {
-          ...cfg.agents,
-          defaults: { sessionStore: { agentId: "research" } },
-        },
-      }),
-    ).toBe("global|main|research");
+    });
+    expect(resolveSessionRoutingContract(routingConfig("ops"))).toBe("global|main|ops");
+    expect(resolveSessionRoutingContract(routingConfig("research"))).toBe("global|main|research");
   });
 
   it("captures an immutable override applier", () => {
@@ -54,12 +44,8 @@ describe("runtime overrides", () => {
         ownership: "explicit",
         defaults: { systemAgent: { agentId: "jarvis" } },
         entries: {
-          jarvis: {
-            workspace: "/tmp/jarvis-workspace",
-          },
-          worker: {
-            workspace: "/tmp/worker-workspace",
-          },
+          jarvis: { workspace: "/tmp/jarvis-workspace" },
+          worker: { workspace: "/tmp/worker-workspace" },
         },
       },
     });
@@ -67,15 +53,11 @@ describe("runtime overrides", () => {
       throw new Error("expected valid keyed agent config");
     }
 
-    const override = setConfigOverride("agents.defaults.model", "test/model");
-    expect(override.ok).toBe(true);
-    const applyCapturedOverrides = captureConfigOverrideApplier();
-    const runtimeConfigs = [
+    expect(setConfigOverride("agents.defaults.model", "test/model").ok).toBe(true);
+    for (const runtimeConfig of [
       applyConfigOverrides(validated.config),
-      applyCapturedOverrides(validated.config),
-    ];
-
-    for (const runtimeConfig of runtimeConfigs) {
+      captureConfigOverrideApplier()(validated.config),
+    ]) {
       expect(runtimeConfig.agents).not.toBe(validated.config.agents);
       expect(Object.getOwnPropertyDescriptor(runtimeConfig.agents, "list")).toMatchObject({
         enumerable: false,
@@ -95,27 +77,20 @@ describe("runtime overrides", () => {
 
   it("unsets overrides and prunes empty branches", () => {
     setConfigOverride("channels.whatsapp.dmPolicy", "open");
-    const removed = unsetConfigOverride("channels.whatsapp.dmPolicy");
-    expect(removed).toEqual({ ok: true, value: true });
-    expect(Object.keys(getConfigOverrides()).length).toBe(0);
+    expect(unsetConfigOverride("channels.whatsapp.dmPolicy")).toEqual({ ok: true, value: true });
+    expect(getConfigOverrides()).toEqual({});
   });
 
   it("rejects prototype pollution paths", () => {
-    const attempts = ["__proto__.polluted", "constructor.polluted", "prototype.polluted"];
-    for (const path of attempts) {
-      const result = setConfigOverride(path, true);
-      expect(result.ok).toBe(false);
-      expect(Object.keys(getConfigOverrides()).length).toBe(0);
+    for (const path of ["__proto__.polluted", "constructor.polluted", "prototype.polluted"]) {
+      expect(setConfigOverride(path, true).ok).toBe(false);
+      expect(getConfigOverrides()).toEqual({});
     }
   });
 
   it("sanitizes blocked object keys when writing overrides", () => {
     setConfigOverride("commands", JSON.parse('{"__proto__":{"bash":true},"debug":true}'));
 
-    expect(getConfigOverrides()).toEqual({
-      commands: {
-        debug: true,
-      },
-    });
+    expect(getConfigOverrides()).toEqual({ commands: { debug: true } });
   });
 });

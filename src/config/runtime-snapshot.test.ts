@@ -358,10 +358,7 @@ describe("runtime snapshot state", () => {
     const loadFreshConfig = vi.fn<() => Promise<{ config: OpenClawConfig }>>(async () => ({
       config: { gateway: { auth: { mode: "token" } } },
     }));
-    let releaseRefresh: (() => void) | undefined;
-    const refreshPending = new Promise<boolean>((resolve) => {
-      releaseRefresh = () => resolve(true);
-    });
+    const refresh = createDeferredCore<boolean>();
 
     setRuntimeConfigSnapshot(
       createProviderConfigFixture("sk-runtime-resolved"),
@@ -371,7 +368,7 @@ describe("runtime snapshot state", () => {
       refresh: async ({ sourceConfig }) => {
         expect(sourceConfig.gateway?.auth).toEqual({ mode: "token" });
         expect(getRuntimeConfigSnapshot()?.gateway?.auth).toBeUndefined();
-        const handled = await refreshPending;
+        const handled = await refresh.promise;
         if (handled) {
           setRuntimeConfigSnapshot(sourceConfig, sourceConfig);
         }
@@ -395,10 +392,7 @@ describe("runtime snapshot state", () => {
     expect(getRuntimeConfigSnapshot()?.gateway?.auth).toBeUndefined();
     expect(loadFreshConfig).not.toHaveBeenCalled();
 
-    if (!releaseRefresh) {
-      throw new Error("Expected runtime snapshot refresh release callback to be initialized");
-    }
-    releaseRefresh();
+    refresh.resolve(true);
     await writePromise;
 
     expect(notifyCommittedWrite).toHaveBeenCalledTimes(1);
@@ -850,53 +844,37 @@ describe("captured async runtime reads", () => {
 });
 
 describe("config environment across in-process restart", () => {
-  it.each([{ operation: "replacement", nextValue: "second" }])(
-    "applies config-owned value $operation after restart",
-    async ({ nextValue }) => {
-      vi.stubEnv("OPENCLAW_TEST_RESTART_VALUE", undefined);
-      vi.stubEnv("OPENCLAW_TEST_RESTART_AMBIENT", "ambient");
-      const initial = {
-        env: {
-          vars: {
-            OPENCLAW_TEST_RESTART_VALUE: "first",
-            OPENCLAW_TEST_RESTART_AMBIENT: "config-default",
-          },
-        },
-      };
-      const beforeStartup = { ...process.env };
+  const restartConfig = (value: string, ambient: string): OpenClawConfig => ({
+    env: { vars: { OPENCLAW_TEST_RESTART_VALUE: value, OPENCLAW_TEST_RESTART_AMBIENT: ambient } },
+  });
+  it("applies config-owned value replacement after restart", async () => {
+    vi.stubEnv("OPENCLAW_TEST_RESTART_VALUE", undefined);
+    vi.stubEnv("OPENCLAW_TEST_RESTART_AMBIENT", "ambient");
+    const initial = restartConfig("first", "config-default");
+    const start = (preserveExistingOwnership = false) => {
+      const before = { ...process.env };
       applyConfigEnvVars(initial);
       initializePublishedConfigRuntimeEnv(initial, {
-        ownedEnv: collectConfigRuntimeEnvOwnership(initial, beforeStartup, process.env),
+        ownedEnv: collectConfigRuntimeEnvOwnership(initial, before, process.env),
+        preserveExistingOwnership,
       });
-      await setAppliedRuntimeConfigSnapshot(initial, initial);
+    };
+    start();
+    await setAppliedRuntimeConfigSnapshot(initial, initial);
 
-      clearRuntimeConfigSnapshot();
-      // Server shutdown and the run loop both clear snapshots before the next boot.
-      clearRuntimeConfigSnapshot();
-      const beforeRestartedStartup = { ...process.env };
-      applyConfigEnvVars(initial);
-      initializePublishedConfigRuntimeEnv(initial, {
-        ownedEnv: collectConfigRuntimeEnvOwnership(initial, beforeRestartedStartup, process.env),
-        preserveExistingOwnership: true,
-      });
-      const next = {
-        env: {
-          vars: {
-            ...(nextValue ? { OPENCLAW_TEST_RESTART_VALUE: nextValue } : {}),
-            OPENCLAW_TEST_RESTART_AMBIENT: "changed-config-default",
-          },
-        },
-      };
-      const publication = prepareConfigRuntimeEnv({
-        previousConfig: initial,
-        nextConfig: next,
-      }).publish();
-      publication.commit();
+    // Server shutdown and the run loop both clear snapshots before the next boot.
+    clearRuntimeConfigSnapshot();
+    clearRuntimeConfigSnapshot();
+    start(true);
+    const publication = prepareConfigRuntimeEnv({
+      previousConfig: initial,
+      nextConfig: restartConfig("second", "changed-config-default"),
+    }).publish();
+    publication.commit();
 
-      expect(process.env.OPENCLAW_TEST_RESTART_VALUE).toBe(nextValue);
-      expect(process.env.OPENCLAW_TEST_RESTART_AMBIENT).toBe("ambient");
-    },
-  );
+    expect(process.env.OPENCLAW_TEST_RESTART_VALUE).toBe("second");
+    expect(process.env.OPENCLAW_TEST_RESTART_AMBIENT).toBe("ambient");
+  });
 
   it("fences a late rollback while retaining the published environment for restart", () => {
     vi.stubEnv("OPENCLAW_TEST_RESTART_VALUE", "first");
