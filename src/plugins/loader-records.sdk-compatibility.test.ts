@@ -13,6 +13,11 @@ import { createEmptyPluginRegistry } from "./registry-empty.js";
 const tempDirs = createTempDirTracker();
 afterEach(() => tempDirs.cleanup());
 
+function write(target: string, content: string | object) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, typeof content === "string" ? content : JSON.stringify(content));
+}
+
 it.each([
   { name: "missing export", nestedSdk: false, wrapped: false },
   { name: "wrapped missing export", nestedSdk: false, wrapped: true },
@@ -37,27 +42,18 @@ it.each([
   const rootDir = path.join(project, "node_modules", packageName);
   const sdkRoot = path.join(nestedSdk ? rootDir : project, "node_modules", "openclaw");
   const seam = `openclaw/plugin-sdk/${nestedSdk ? "channel-runtime" : "agent-harness-runtime"}`;
-  const write = (target: string, content: string) => {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, content);
-  };
-  write(
-    path.join(project, "package.json"),
-    JSON.stringify({ dependencies: { [packageName]: "2026.7.1" } }),
-  );
-  write(
-    path.join(rootDir, "package.json"),
-    JSON.stringify({ name: packageName, version: "2026.7.1", type: "module" }),
-  );
-  write(
-    path.join(sdkRoot, "package.json"),
-    JSON.stringify({
-      name: "openclaw",
-      version: nestedSdk ? "2026.7.1" : VERSION,
-      type: "module",
-      exports: nestedSdk ? {} : { "./plugin-sdk/agent-harness-runtime": "./runtime.mjs" },
-    }),
-  );
+  write(path.join(project, "package.json"), { dependencies: { [packageName]: "2026.7.1" } });
+  write(path.join(rootDir, "package.json"), {
+    name: packageName,
+    version: "2026.7.1",
+    type: "module",
+  });
+  write(path.join(sdkRoot, "package.json"), {
+    name: "openclaw",
+    version: nestedSdk ? "2026.7.1" : VERSION,
+    type: "module",
+    exports: nestedSdk ? {} : { "./plugin-sdk/agent-harness-runtime": "./runtime.mjs" },
+  });
   write(path.join(sdkRoot, "runtime.mjs"), "export const available = true;");
   const source = path.join(rootDir, "index.mjs");
   write(

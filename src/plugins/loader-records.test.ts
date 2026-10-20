@@ -1,7 +1,29 @@
-/** Verifies plugin loader records expose stable metadata for registered plugin surfaces. */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPluginRecord, recordPluginError } from "./loader-records.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
+
+function recordError(error: Error, origin: "global" | "bundled", missingDependencyHint?: string) {
+  const id = origin === "global" ? "broken-plugin" : "discord";
+  const record = createPluginRecord({
+    id,
+    source: `/tmp/${id}/index.js`,
+    origin,
+    enabled: true,
+    configSchema: false,
+  });
+  recordPluginError({
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    registry: createEmptyPluginRegistry(),
+    record,
+    seenIds: new Map(),
+    phase: "load",
+    error,
+    logPrefix: "",
+    diagnosticMessagePrefix: "",
+    missingDependencyHint,
+  });
+  return record.error;
+}
 
 describe("plugin loader records", () => {
   afterEach(() => {
@@ -13,29 +35,10 @@ describe("plugin loader records", () => {
     { diagnostics: "1", expected: "Error: boom\n    at plugin-entry.ts:1:1" },
   ])("uses lifecycle tracing for loader error stacks", ({ diagnostics, expected }) => {
     vi.stubEnv("OPENCLAW_PLUGIN_LIFECYCLE_TRACE", diagnostics);
-    const registry = createEmptyPluginRegistry();
-    const record = createPluginRecord({
-      id: "broken-plugin",
-      source: "/tmp/broken-plugin/index.js",
-      origin: "global",
-      enabled: true,
-      configSchema: false,
-    });
     const error = new Error("boom");
     error.stack = "Error: boom\n    at plugin-entry.ts:1:1";
 
-    recordPluginError({
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      registry,
-      record,
-      seenIds: new Map(),
-      phase: "load",
-      error,
-      logPrefix: "",
-      diagnosticMessagePrefix: "",
-    });
-
-    expect(record.error).toBe(expected);
+    expect(recordError(error, "global")).toBe(expected);
   });
 
   it.each([
@@ -74,27 +77,6 @@ describe("plugin loader records", () => {
       expected: "Error: hostile",
     },
   ])("$name", ({ error, expected }) => {
-    const registry = createEmptyPluginRegistry();
-    const record = createPluginRecord({
-      id: "discord",
-      source: "/tmp/discord/index.js",
-      origin: "bundled",
-      enabled: true,
-      configSchema: false,
-    });
-
-    recordPluginError({
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      registry,
-      record,
-      seenIds: new Map(),
-      phase: "load",
-      error,
-      logPrefix: "",
-      diagnosticMessagePrefix: "",
-      missingDependencyHint: "install @openclaw/discord",
-    });
-
-    expect(record.error).toBe(expected);
+    expect(recordError(error, "bundled", "install @openclaw/discord")).toBe(expected);
   });
 });

@@ -36,7 +36,7 @@ vi.mock("../config/config.js", () => ({
   },
   readConfigFileSnapshot: async () => (await mocks.readConfig()).snapshot,
   readConfigFileSnapshotForWrite: () => mocks.readConfig(),
-  replaceConfigFile: (params: unknown) => mocks.replaceConfig(params),
+  replaceConfigFile: mocks.replaceConfig,
 }));
 
 vi.mock("../config/io.factory.js", async (importOriginal) => {
@@ -52,52 +52,48 @@ vi.mock("../config/io.factory.js", async (importOriginal) => {
 
 vi.mock("./install-config-mutation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./install-config-mutation.js")>()),
-  resolveInstallConfigMutationPreflights: (...args: unknown[]) => mocks.preflight(...args),
-  selectInstallMutationWriteOptions: (writeOptions: unknown) =>
-    mocks.selectWriteOptions(writeOptions),
+  resolveInstallConfigMutationPreflights: mocks.preflight,
+  selectInstallMutationWriteOptions: mocks.selectWriteOptions,
 }));
 
 vi.mock("./slot-selection.js", () => ({
-  applySlotSelectionForPlugin: (config: unknown) => mocks.slotSelection(config),
+  applySlotSelectionForPlugin: mocks.slotSelection,
 }));
 
 vi.mock("./registry-refresh.js", () => ({
-  refreshPluginRegistryAfterConfigMutation: (...args: unknown[]) => mocks.refreshRegistry(...args),
+  refreshPluginRegistryAfterConfigMutation: mocks.refreshRegistry,
 }));
 
 vi.mock("./plugin-metadata-snapshot.js", () => ({
-  loadPluginMetadataSnapshot: (...args: unknown[]) => mocks.metadata(...args),
-  resolvePluginMetadataSnapshot: (...args: unknown[]) => mocks.metadata(...args),
+  loadPluginMetadataSnapshot: mocks.metadata,
+  resolvePluginMetadataSnapshot: mocks.metadata,
 }));
 
 vi.mock("./installed-plugin-index-records.js", async (importOriginal) => ({
   // Keep the pure config/record helpers real; only record IO is stubbed.
   ...(await importOriginal<typeof import("./installed-plugin-index-records.js")>()),
-  loadInstalledPluginIndexInstallRecords: (...args: unknown[]) => mocks.installRecords(...args),
-  readPersistedInstalledPluginIndexInstallRecordsAsync: (...args: unknown[]) =>
-    mocks.readPersistedRecords(...args),
+  loadInstalledPluginIndexInstallRecords: mocks.installRecords,
+  readPersistedInstalledPluginIndexInstallRecordsAsync: mocks.readPersistedRecords,
 }));
 
 vi.mock("./uninstall.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./uninstall.js")>()),
-  applyPluginUninstallDirectoryRemoval: (...args: unknown[]) => mocks.applyUninstall(...args),
-  planPluginUninstall: (...args: unknown[]) => mocks.planUninstall(...args),
+  applyPluginUninstallDirectoryRemoval: mocks.applyUninstall,
+  planPluginUninstall: mocks.planUninstall,
 }));
 
 vi.mock("./install-record-commit.js", () => ({
-  commitPluginInstallRecordsWithConfig: (...args: unknown[]) => mocks.commitRecords(...args),
+  commitPluginInstallRecordsWithConfig: mocks.commitRecords,
 }));
 
 vi.mock("./official-external-plugin-catalog.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./official-external-plugin-catalog.js")>()),
-  loadConfiguredHostedOfficialExternalPluginCatalogEntries: (...args: unknown[]) =>
-    mocks.officialCatalog(...args),
+  loadConfiguredHostedOfficialExternalPluginCatalogEntries: mocks.officialCatalog,
 }));
 
 vi.mock("../infra/clawhub-plugin-catalog.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../infra/clawhub-plugin-catalog.js")>()),
-  fetchClawHubPluginVersionCategories: (...args: unknown[]) =>
-    mocks.pluginVersionCategories(...args),
+  fetchClawHubPluginVersionCategories: mocks.pluginVersionCategories,
 }));
 
 const { clearManagedPluginCatalogCache } = await import("./management-catalog.js");

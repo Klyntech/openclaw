@@ -68,14 +68,47 @@ vi.mock("./registry-refresh.js", () => ({
 
 const { uninstallManagedPlugin } = await import("./management-uninstall.js");
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+type CommitRequest = Parameters<
+  typeof import("./install-record-commit.js").commitPluginInstallRecordsWithConfig
+>[0];
+
+function expectCommit(expected: Record<string, unknown>) {
+  expect(mocks.commitRecords).toHaveBeenCalledWith(expect.objectContaining(expected));
+}
+
+async function mutableConfig(
+  configPath: string,
+  config: OpenClawConfig,
+  hash = "base-hash",
+  replaceHash?: string,
+) {
+  const configFiles = createTestConfigFileStore();
+  const state = {
+    config,
+    async write(next: OpenClawConfig, persistedHash?: string) {
+      state.config = next;
+      await fs.writeFile(configPath, JSON.stringify(next));
+      return {
+        ...configFiles.write(next, configPath),
+        ...(persistedHash ? { persistedHash, persistedSourceConfig: next } : {}),
+      };
+    },
+  };
+  await fs.writeFile(configPath, JSON.stringify(config));
+  mockConfig(configPath, () => state.config, hash);
+  mocks.replaceConfig.mockImplementation(({ sourceConfig }: { sourceConfig: OpenClawConfig }) =>
+    state.write(sourceConfig, replaceHash),
+  );
+  return state;
+}
 
 function mockConfig(
   configPath: string,
-  source: OpenClawConfig | (() => OpenClawConfig),
+  source: OpenClawConfig | (() => OpenClawConfig | Promise<OpenClawConfig>),
   hash = "base-hash",
 ) {
   mocks.readConfig.mockImplementation(async () => {
-    const config = typeof source === "function" ? source() : source;
+    const config = typeof source === "function" ? await source() : source;
     return {
       snapshot: {
         valid: true,
@@ -118,84 +151,57 @@ describe("plugin management uninstall channel ownership", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     const configFiles = createTestConfigFileStore();
-    mocks.commitRecords.mockImplementation(
-      async ({
-        nextConfig,
-        writeOptions,
-      }: Parameters<
-        typeof import("./install-record-commit.js").commitPluginInstallRecordsWithConfig
-      >[0]) => {
-        const configPath = expectDefined(
-          writeOptions?.ownedConfigPathForWrite ?? writeOptions?.expectedConfigPath,
-          "fixture config write path",
-        );
-        const afterWrite = writeOptions?.afterWrite ?? { mode: "auto" as const };
-        return {
-          configWrite: {
-            ...configFiles.write(nextConfig, configPath),
-            persistedHash: "committed",
-            persistedSourceConfig: nextConfig,
-            afterWrite,
-            followUp: resolveConfigWriteFollowUp(afterWrite),
-          },
-        };
-      },
-    );
+    mocks.commitRecords.mockImplementation(async ({ nextConfig, writeOptions }: CommitRequest) => {
+      const configPath = expectDefined(
+        writeOptions?.ownedConfigPathForWrite ?? writeOptions?.expectedConfigPath,
+        "fixture config write path",
+      );
+      const afterWrite = writeOptions?.afterWrite ?? { mode: "auto" as const };
+      return {
+        configWrite: {
+          ...configFiles.write(nextConfig, configPath),
+          persistedHash: "committed",
+          persistedSourceConfig: nextConfig,
+          afterWrite,
+          followUp: resolveConfigWriteFollowUp(afterWrite),
+        },
+      };
+    });
   });
 
-  it.each([
-    {
-      label: "a disabled channel plugin",
-      enabled: false,
-      channelIds: ["owned-channel", "owned-channel-backup"],
-    },
-  ])(
-    "preserves manifest channel ownership when uninstalling $label",
-    async ({ enabled, channelIds }) => {
-      const root = tempDirs.make("openclaw-managed-linked-uninstall-");
-      const configPath = path.join(root, "openclaw.json");
-      const pluginId = "custom-plugin";
-      const installPath = "/tmp/openclaw-managed-linked-custom-plugin";
-      const installRecord = { source: "path", sourcePath: installPath, installPath } as const;
-      const channels = {
-        [pluginId]: { enabled: true },
-        "owned-channel": { enabled: true },
-        "owned-channel-backup": { enabled: true },
-        discord: { enabled: true },
-      };
-      mockConfig(configPath, { plugins: { entries: { [pluginId]: { enabled } } }, channels });
-      mocks.installRecords.mockResolvedValue({ [pluginId]: installRecord });
-      mocks.metadata.mockReturnValue(
-        packageMetadata(pluginId, { [pluginId]: installRecord }, [
-          { id: pluginId, enabled, channels: channelIds },
-        ]),
-      );
+  it("preserves manifest channel ownership when uninstalling a disabled channel plugin", async () => {
+    const root = tempDirs.make("openclaw-managed-linked-uninstall-");
+    const configPath = path.join(root, "openclaw.json");
+    const pluginId = "custom-plugin";
+    const installPath = "/tmp/openclaw-managed-linked-custom-plugin";
+    const installRecord = { source: "path", sourcePath: installPath, installPath } as const;
+    const channels = {
+      [pluginId]: { enabled: true },
+      "owned-channel": { enabled: true },
+      "owned-channel-backup": { enabled: true },
+      discord: { enabled: true },
+    };
+    mockConfig(configPath, { plugins: { entries: { [pluginId]: { enabled: false } } }, channels });
+    mocks.installRecords.mockResolvedValue({ [pluginId]: installRecord });
+    mocks.metadata.mockReturnValue(
+      packageMetadata(pluginId, { [pluginId]: installRecord }, [
+        { id: pluginId, enabled: false, channels: ["owned-channel", "owned-channel-backup"] },
+      ]),
+    );
 
-      const result = await uninstallManagedPlugin({
-        pluginId,
-        env: { OPENCLAW_STATE_DIR: root },
-      });
+    const result = await uninstallManagedPlugin({
+      pluginId,
+      env: { OPENCLAW_STATE_DIR: root },
+    });
 
-      const ownedChannelIds = channelIds;
-      expect(mocks.commitRecords).toHaveBeenCalledWith(
-        expect.objectContaining({
-          nextConfig: expect.objectContaining({
-            channels: Object.fromEntries(
-              Object.entries(channels).filter(
-                ([channelId]) => !ownedChannelIds.includes(channelId),
-              ),
-            ),
-          }),
-          nextInstallRecords: {},
-        }),
-      );
-      expect(result.removed).toEqual([
-        "plugin settings",
-        "install record",
-        ...(ownedChannelIds.length > 0 ? ["channel config"] : []),
-      ]);
-    },
-  );
+    expectCommit({
+      nextConfig: expect.objectContaining({
+        channels: { [pluginId]: { enabled: true }, discord: { enabled: true } },
+      }),
+      nextInstallRecords: {},
+    });
+    expect(result.removed).toEqual(["plugin settings", "install record", "channel config"]);
+  });
 
   it("fails closed when an owner record has no authoritative child metadata", async () => {
     const pluginId = "custom-plugin";
@@ -249,26 +255,16 @@ describe("plugin management uninstall channel ownership", () => {
     async (claimed) => {
       const root = tempDirs.make("openclaw-managed-orphan-uninstall-");
       const configPath = path.join(root, "openclaw.json");
-      const configFiles = createTestConfigFileStore();
       const pluginId = "orphaned-plugin";
       const installRecord = {
         source: "path",
         sourcePath: path.join(root, "missing-orphan-source"),
         installPath: path.join(root, "missing-orphan-install"),
       } as const;
-      let config: OpenClawConfig = {
+      await mutableConfig(configPath, {
         plugins: { entries: { [pluginId]: { enabled: true } } },
         channels: { [pluginId]: { enabled: true }, unknown: { enabled: true } },
-      };
-      await fs.writeFile(configPath, JSON.stringify(config));
-      mockConfig(configPath, () => config);
-      mocks.replaceConfig.mockImplementation(
-        async ({ sourceConfig }: { sourceConfig: OpenClawConfig }) => {
-          config = sourceConfig;
-          await fs.writeFile(configPath, JSON.stringify(config));
-          return configFiles.write(config, configPath);
-        },
-      );
+      });
       mocks.installRecords.mockResolvedValue({ [pluginId]: installRecord });
       mocks.metadata.mockReturnValue({
         index: {
@@ -293,22 +289,20 @@ describe("plugin management uninstall channel ownership", () => {
         env: { OPENCLAW_STATE_DIR: root },
       });
 
-      expect(mocks.commitRecords).toHaveBeenCalledWith(
-        expect.objectContaining({
-          nextConfig: {
-            channels: {
-              ...(claimed ? { [pluginId]: { enabled: true } } : {}),
-              unknown: { enabled: true },
-            },
-            plugins: {
-              entries: {
-                [pluginId]: { enabled: false },
-              },
+      expectCommit({
+        nextConfig: {
+          channels: {
+            ...(claimed ? { [pluginId]: { enabled: true } } : {}),
+            unknown: { enabled: true },
+          },
+          plugins: {
+            entries: {
+              [pluginId]: { enabled: false },
             },
           },
-          nextInstallRecords: {},
-        }),
-      );
+        },
+        nextInstallRecords: {},
+      });
       expect(result.pluginId).toBe(pluginId);
       expect(result.removed).toContain("install record");
     },
@@ -346,22 +340,20 @@ describe("plugin management uninstall channel ownership", () => {
       env: { OPENCLAW_STATE_DIR: root },
     });
 
-    expect(mocks.commitRecords).toHaveBeenCalledWith(
-      expect.objectContaining({
-        nextInstallRecords: {},
-        nextConfig: {
-          channels: undefined,
-          plugins: {
-            allow: ["other"],
-            entries: {
-              other: { enabled: true },
-              "pack/one": { enabled: false },
-              "pack/two": { enabled: false },
-            },
+    expectCommit({
+      nextInstallRecords: {},
+      nextConfig: {
+        channels: undefined,
+        plugins: {
+          allow: ["other"],
+          entries: {
+            other: { enabled: true },
+            "pack/one": { enabled: false },
+            "pack/two": { enabled: false },
           },
         },
-      }),
-    );
+      },
+    });
     expect(result.pluginId).toBe("pack");
     expect(result.warnings).toContain(
       'Uninstalled package "pack" and all owned plugin entries: pack/one, pack/two.',
@@ -376,47 +368,28 @@ describe("plugin management uninstall channel ownership", () => {
     async ({ keepFiles, linked }) => {
       const root = await fs.realpath(tempDirs.make("uninstall-runtime-refusal-"));
       const configPath = path.join(root, "openclaw.json");
-      const configFiles = createTestConfigFileStore();
       const sourcePath = path.join(root, "source");
       const installPath = linked ? sourcePath : path.join(root, "extensions", "demo");
       await fs.mkdir(installPath, { recursive: true });
       await fs.writeFile(path.join(installPath, "index.js"), "export default {};\n");
       const installRecord = { source: "path" as const, sourcePath, installPath };
       let records: Record<string, PluginInstallRecord> = { demo: installRecord };
-      let config: OpenClawConfig = {
-        plugins: { entries: { demo: { enabled: true } }, load: { paths: [installPath] } },
-      };
-      await fs.writeFile(configPath, JSON.stringify(config));
-      mockConfig(configPath, () => config, "current");
-      mocks.installRecords.mockImplementation(async () => records);
-      mocks.replaceConfig.mockImplementation(
-        async ({ sourceConfig }: { sourceConfig: OpenClawConfig }) => {
-          config = sourceConfig;
-          await fs.writeFile(configPath, JSON.stringify(config));
-          return {
-            ...configFiles.write(config, configPath),
-            persistedHash: "disabled",
-            persistedSourceConfig: config,
-          };
+      const state = await mutableConfig(
+        configPath,
+        {
+          plugins: { entries: { demo: { enabled: true } }, load: { paths: [installPath] } },
         },
+        "current",
+        "disabled",
       );
+      mocks.installRecords.mockImplementation(async () => records);
       mocks.commitRecords.mockImplementation(
-        async ({
-          nextConfig,
-          nextInstallRecords,
-          writeOptions,
-        }: Parameters<
-          typeof import("./install-record-commit.js").commitPluginInstallRecordsWithConfig
-        >[0]) => {
-          config = nextConfig;
+        async ({ nextConfig, nextInstallRecords, writeOptions }: CommitRequest) => {
           records = nextInstallRecords;
-          await fs.writeFile(configPath, JSON.stringify(config));
           const afterWrite = writeOptions?.afterWrite ?? { mode: "auto" as const };
           return {
             configWrite: {
-              ...configFiles.write(config, configPath),
-              persistedHash: "removed",
-              persistedSourceConfig: config,
+              ...(await state.write(nextConfig, "removed")),
               afterWrite,
               followUp: resolveConfigWriteFollowUp(afterWrite),
             },
@@ -431,7 +404,7 @@ describe("plugin management uninstall channel ownership", () => {
             ? [
                 {
                   id: "demo",
-                  enabled: config.plugins?.entries?.demo?.enabled,
+                  enabled: state.config.plugins?.entries?.demo?.enabled,
                   source: path.join(installPath, "index.js"),
                 },
               ]
@@ -456,7 +429,7 @@ describe("plugin management uninstall channel ownership", () => {
         applyRuntime,
       };
       await expect(uninstallManagedPlugin(request)).rejects.toBe(failure);
-      expect(config.plugins?.entries?.demo?.enabled).toBe(false);
+      expect(state.config.plugins?.entries?.demo?.enabled).toBe(false);
       expect(records.demo).toEqual(installRecord);
       expect(mocks.commitRecords).not.toHaveBeenCalled();
       expect((await fs.stat(installPath)).isDirectory()).toBe(true);
@@ -465,8 +438,8 @@ describe("plugin management uninstall channel ownership", () => {
       const result = await uninstallManagedPlugin(request);
       expect(result.pluginId).toBe("demo");
       expect(records.demo).toBeUndefined();
-      expect(config.plugins?.entries?.demo?.enabled).toBe(false);
-      expect(config.plugins?.load?.paths ?? []).not.toContain(installPath);
+      expect(state.config.plugins?.entries?.demo?.enabled).toBe(false);
+      expect(state.config.plugins?.load?.paths ?? []).not.toContain(installPath);
       expect(mocks.commitRecords).toHaveBeenCalledOnce();
       if (keepFiles || linked) {
         expect((await fs.stat(installPath)).isDirectory()).toBe(true);
@@ -499,21 +472,16 @@ describe("plugin management uninstall channel ownership", () => {
       },
     };
     await fs.writeFile(configPath, JSON.stringify(currentConfig));
-    mocks.readConfig.mockImplementation(async () => {
-      for (const loadPath of currentConfig.plugins?.load?.paths ?? []) {
-        await fs.stat(loadPath);
-      }
-      return {
-        snapshot: {
-          valid: true,
-          parsed: currentConfig,
-          path: configPath,
-          sourceConfig: currentConfig,
-          hash: "current-hash",
-        },
-        writeOptions: { expectedConfigPath: configPath },
-      };
-    });
+    mockConfig(
+      configPath,
+      async () => {
+        for (const loadPath of currentConfig.plugins?.load?.paths ?? []) {
+          await fs.stat(loadPath);
+        }
+        return currentConfig;
+      },
+      "current-hash",
+    );
     mocks.replaceConfig.mockImplementation(
       async ({ sourceConfig }: { sourceConfig: OpenClawConfig }) => {
         expect(sourceConfig.plugins?.load?.paths).toEqual([unrelatedPath]);
@@ -557,18 +525,16 @@ describe("plugin management uninstall channel ownership", () => {
     expect(result.application).toEqual({ ...finalApplication, warnings: [cleanupWarning] });
     expect(result.warnings).toContain(cleanupWarning);
     expect(result.removed).toContain("load path");
-    expect(mocks.commitRecords).toHaveBeenCalledWith(
-      expect.objectContaining({
-        nextInstallRecords: {},
-        nextConfig: expect.objectContaining({
-          logging: { level: "debug" },
-          plugins: {
-            entries: { demo: { enabled: false } },
-            load: { paths: [unrelatedPath, addedPath] },
-          },
-        }),
+    expectCommit({
+      nextInstallRecords: {},
+      nextConfig: expect.objectContaining({
+        logging: { level: "debug" },
+        plugins: {
+          entries: { demo: { enabled: false } },
+          load: { paths: [unrelatedPath, addedPath] },
+        },
       }),
-    );
+    });
     await expect(fs.stat(installPath)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await fs.stat(sourcePath)).isDirectory()).toBe(true);
   });

@@ -28,7 +28,7 @@ const groups = [
   { id: "general", title: "General", order: 10, properties: ["enabled"] },
 ];
 
-function loadMetadata(configGroups: unknown, uiHints?: unknown) {
+function schemaFor(configGroups: unknown, uiHints?: unknown) {
   const rootDir = makeTrackedTempDir("openclaw-config-groups", roots);
   fs.writeFileSync(
     path.join(rootDir, "openclaw.plugin.json"),
@@ -46,7 +46,7 @@ function loadMetadata(configGroups: unknown, uiHints?: unknown) {
     ],
   });
   expect(registry.plugins).toHaveLength(1);
-  return collectPluginSchemaMetadataCore(registry);
+  return buildConfigSchemaCore({ plugins: collectPluginSchemaMetadataCore(registry) });
 }
 
 afterEach(() => {
@@ -56,9 +56,7 @@ afterEach(() => {
 
 describe("authored plugin config groups", () => {
   it.each([true, false, "yes"])("normalizes and publishes multiline hint %j", (multiline) => {
-    const response = buildConfigSchemaCore({
-      plugins: loadMetadata(groups, { "storage.path": { multiline } }),
-    });
+    const response = schemaFor(groups, { "storage.path": { multiline } });
     const lookup = lookupConfigSchema(response, `${configPath}.storage.path`);
     expect(lookup?.hint?.multiline).toBe(typeof multiline === "boolean" ? multiline : undefined);
     expect(Value.Check(ConfigSchemaResponseSchema, response)).toBe(true);
@@ -66,7 +64,7 @@ describe("authored plugin config groups", () => {
   });
 
   it("carries groups through discovery into schema and lookup without hiding ungrouped fields", () => {
-    const response = buildConfigSchemaCore({ plugins: loadMetadata(groups) });
+    const response = schemaFor(groups);
     const lookup = lookupConfigSchema(response, configPath);
 
     expect(response.uiHints[configPath]).toMatchObject({ groups });
@@ -84,9 +82,9 @@ describe("authored plugin config groups", () => {
   });
 
   it("refreshes cached schema presentation when only authored grouping changes", () => {
-    const first = buildConfigSchemaCore({ plugins: loadMetadata(groups) });
+    const first = schemaFor(groups);
     const renamed = [{ ...groups[0], title: "Data storage" }, groups[1]];
-    const next = buildConfigSchemaCore({ plugins: loadMetadata(renamed) });
+    const next = schemaFor(renamed);
 
     expect(first.uiHints[configPath]).toMatchObject({ groups });
     expect(next.uiHints[configPath]).toMatchObject({ groups: renamed });
@@ -108,7 +106,7 @@ describe("authored plugin config groups", () => {
     { label: "unknown property", value: [{ ...groups[0], properties: ["unknown"] }] },
     { label: "nested path", value: [{ ...groups[0], properties: ["storage.path"] }] },
   ])("keeps the plugin and every config field available with $label grouping", ({ value }) => {
-    const response = buildConfigSchemaCore({ plugins: loadMetadata(value) });
+    const response = schemaFor(value);
     const lookup = lookupConfigSchema(response, configPath);
 
     expect(response.uiHints[configPath]).not.toHaveProperty("groups");
