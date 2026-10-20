@@ -266,23 +266,21 @@ suite.define(() => {
           .poll(() => pane.locator('openclaw-chat-header-session-menu [role^="menuitem"]').count())
           .toBeGreaterThan(0);
         expect(await pane.locator('[role="menu"][popover]:popover-open').count()).toBe(0);
-        const measurement = await page.evaluate(() => ({
-          tags: Object.fromEntries(window.chatBootRenderCounts),
-          closedMenuItems: document.querySelectorAll(
-            'openclaw-chat-pane [role="menu"][popover]:not(:popover-open) [role^="menuitem"]',
-          ).length,
-          unrelatedClosedMenuItems: Array.from(
+        const measurement = await page.evaluate(() => {
+          const items = Array.from(
             document.querySelectorAll(
               'openclaw-chat-pane [role="menu"][popover]:not(:popover-open) [role^="menuitem"]',
             ),
-          ).filter((item) => !item.closest("openclaw-chat-header-session-menu")).length,
-          closedMenuHosts: Array.from(
-            document.querySelectorAll(
-              'openclaw-chat-pane [role="menu"][popover]:not(:popover-open) [role^="menuitem"]',
-            ),
-            (item) => item.closest('[role="menu"][popover]')?.className,
-          ),
-        }));
+          );
+          return {
+            tags: Object.fromEntries(window.chatBootRenderCounts),
+            closedMenuItems: items.length,
+            unrelatedClosedMenuItems: items.filter(
+              (item) => !item.closest("openclaw-chat-header-session-menu"),
+            ).length,
+            closedMenuHosts: items.map((item) => item.closest('[role="menu"][popover]')?.className),
+          };
+        });
         await writeFile(
           path.join(suite.artifactDir, "chat-boot-render-counts.json"),
           JSON.stringify(measurement, null, 2),
@@ -293,11 +291,12 @@ suite.define(() => {
         expect(measurement.unrelatedClosedMenuItems).toBe(0);
 
         const composer = pane.getByRole("textbox", { name: "Chat composer" });
-        await composer.fill("Keep this draft while the menus open.");
+        const draft = "Keep this draft while the menus open.";
+        await composer.fill(draft);
         await waitForCommittedComposerDraft(
           page,
           `chat:v3:${sessionKey}\u0000agent:main`,
-          "Keep this draft while the menus open.",
+          draft,
           0,
         );
         const trigger = pane.getByRole("button", { name: `Actions for ${label}` });
@@ -311,11 +310,8 @@ suite.define(() => {
         ).toBeGreaterThan(10);
         await page.keyboard.press("Escape");
         await pane.getByRole("button", { name: "Session sharing", exact: true }).click();
-        await pane
-          .locator(".chat-pane__sharing-menu")
-          .getByText("Members", { exact: true })
-          .waitFor();
         const sharing = pane.locator(".chat-pane__sharing-menu");
+        await sharing.getByText("Members", { exact: true }).waitFor();
         const search = sharing.getByRole("searchbox", { name: "Search people and agents…" });
         await search.fill("Person 109");
         await nextFrame(page);
@@ -337,7 +333,7 @@ suite.define(() => {
             .locator(".chat-pane__sharing-trigger")
             .evaluate((element) => element === document.activeElement),
         ).toBe(true);
-        expect(await composer.inputValue()).toBe("Keep this draft while the menus open.");
+        expect(await composer.inputValue()).toBe(draft);
         expect(await gateway.getRequests("chat.send")).toHaveLength(0);
       },
     );

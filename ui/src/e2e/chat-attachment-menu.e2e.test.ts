@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import {
   attachmentBrowserFixtures,
+  attachmentOption,
   installAttachmentBrowserIdentity,
 } from "./chat-attachment-menu.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
@@ -14,7 +15,7 @@ const suite = createControlUiE2eSuite({
 
 async function choose(page: Page, kind: string) {
   await page.getByRole("button", { name: "Add attachment", exact: true }).press("Enter");
-  const item = page.locator(`.agent-chat__attach-menu-option[data-value="${kind}"]`);
+  const item = attachmentOption(page, kind);
   await item.waitFor({ state: "visible" });
   const pending = page.waitForEvent("filechooser");
   await item.press("Enter");
@@ -280,9 +281,7 @@ suite.define(() => {
         ] as const) {
           await page.setViewportSize({ width, height });
           await trigger.press("Enter");
-          await page
-            .locator('.agent-chat__attach-menu-option[data-value="file"]')
-            .waitFor({ state: "visible" });
+          await attachmentOption(page, "file").waitFor({ state: "visible" });
           expect((await items.allTextContents()).map((text) => text.trim())).toEqual(
             fixture.single ? ["Attach…"] : ["Take photo", "Photo", "File"],
           );
@@ -292,21 +291,16 @@ suite.define(() => {
             );
           }
           await page.keyboard.press("Escape");
-          await page
-            .locator('.agent-chat__attach-menu-option[data-value="file"]')
-            .waitFor({ state: "hidden" });
+          await attachmentOption(page, "file").waitFor({ state: "hidden" });
         }
         for (const kind of fixture.single ? ["file"] : ["file", "photo"]) {
           const chooser = await choose(page, kind);
-          expect(await chooser.element().getAttribute("class")).toBe(`agent-chat__${kind}-input`);
           expect(chooser.isMultiple()).toBe(true);
+          expect(await chooser.element().getAttribute("class")).toBe(`agent-chat__${kind}-input`);
           expect(await chooser.element().getAttribute("capture")).toBeNull();
-          const accept = await chooser.element().getAttribute("accept");
-          if (kind === "file") {
-            expect(accept).toBeNull();
-          } else {
-            expect(accept).toBe("image/*");
-          }
+          expect(await chooser.element().getAttribute("accept")).toBe(
+            kind === "file" ? null : "image/*",
+          );
           // Boundary-only cancellation: Playwright does not exercise OS dialogs.
           await chooser.setFiles([]);
           expect(await page.locator(".chat-attachment-thumb").count()).toBe(0);
@@ -315,7 +309,8 @@ suite.define(() => {
           const draft = page
             .locator(".agent-chat__composer-shell textarea, .new-session-page__composer textarea")
             .first();
-          await draft.fill("Keep this draft while taking a photo");
+          const draftText = "Keep this draft while taking a photo";
+          await draft.fill(draftText);
           const chooser = await choose(page, "camera");
           expect(chooser.isMultiple()).toBe(false);
           expect(await chooser.element().getAttribute("accept")).toBe("image/*");
@@ -325,7 +320,7 @@ suite.define(() => {
           );
           expect(await page.locator("html").getAttribute("data-camera-requested")).toBeNull();
           await chooser.setFiles([]);
-          expect(await draft.inputValue()).toBe("Keep this draft while taking a photo");
+          expect(await draft.inputValue()).toBe(draftText);
           const photo = {
             name: "camera.png",
             mimeType: "image/png",
@@ -341,7 +336,7 @@ suite.define(() => {
           await page.getByRole("button", { name: "Remove camera.png", exact: true }).click();
           await (await choose(page, "camera")).setFiles(photo);
           await expect.poll(() => ready.count()).toBe(1);
-          expect(await draft.inputValue()).toBe("Keep this draft while taking a photo");
+          expect(await draft.inputValue()).toBe(draftText);
         } else if (!fixture.single) {
           await trigger.press("Enter");
           await page.getByRole("menuitem", { name: "Take photo", exact: true }).press("Enter");

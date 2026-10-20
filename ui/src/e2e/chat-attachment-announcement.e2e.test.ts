@@ -1,18 +1,11 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { beforeEach, expect, it } from "vitest";
-import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
+import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Attachment failure announcements" });
 const captureProof = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
-let proofDir: string;
-beforeEach(() => {
-  if (captureProof) {
-    proofDir = createControlUiE2eArtifactDir("attachment-announcement");
-  }
-});
 
 suite.define(() => {
   it.each(["ordinary", "completed"])(
@@ -45,7 +38,7 @@ suite.define(() => {
           expect(await announcement.getAttribute("aria-atomic")).toBe("true");
           expect(await announcement.textContent()).toBe("");
           if (captureProof) {
-            await page.screenshot({ path: path.join(proofDir, `${flow}-initial.png`) });
+            await page.screenshot({ path: path.join(suite.artifactDir, `${flow}-initial.png`) });
           }
 
           let runId: string | undefined;
@@ -98,9 +91,9 @@ suite.define(() => {
           const text = (await announcement.textContent()) ?? "";
           if (captureProof) {
             const stage = text.includes("missing.pdf") ? "after" : "before";
-            await page.screenshot({ path: path.join(proofDir, `${flow}-${stage}.png`) });
+            await page.screenshot({ path: path.join(suite.artifactDir, `${flow}-${stage}.png`) });
             await writeFile(
-              path.join(proofDir, `${flow}-${stage}.json`),
+              path.join(suite.artifactDir, `${flow}-${stage}.json`),
               JSON.stringify({ flow, text, length: text.length, card: cardText }, null, 2),
             );
           }

@@ -444,18 +444,15 @@ async function captureStreamProof(page: Page, caseName: StreamCase) {
     return;
   }
   await page.screenshot({ path: path.join(suite.artifactDir, `${caseName}.png`) });
-  await writeFile(
-    path.join(suite.artifactDir, `${caseName}.json`),
-    `${JSON.stringify(
-      {
-        gatewayRuntime,
-        browser: await readBrowserResponses(page),
-        server: readServerResponses(caseName),
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  await writeProof(`${caseName}.json`, {
+    gatewayRuntime,
+    browser: await readBrowserResponses(page),
+    server: readServerResponses(caseName),
+  });
+}
+
+async function writeProof(name: string, proof: unknown) {
+  await writeFile(path.join(suite.artifactDir, name), `${JSON.stringify(proof, null, 2)}\n`);
 }
 
 suite.define(() => {
@@ -482,26 +479,19 @@ suite.define(() => {
         ).toContain(reply);
         if (captureEnabled) {
           await page.screenshot({ path: path.join(suite.artifactDir, "02-avatar-decoded.png") });
-          await writeFile(
-            path.join(suite.artifactDir, "evidence.json"),
-            JSON.stringify(
-              {
-                gatewayRuntime,
-                sessionKey,
-                configuredWorkspaceAvatar: "agent-avatar.png",
-                assistantAvatarCount: await avatar.count(),
-                decodedWidth: await decodedWidth(),
-                visibleBesidePersistedReply: true,
-                servedScripts: await page
-                  .locator("script[src]")
-                  .evaluateAll((scripts) =>
-                    scripts.map((script) => new URL((script as HTMLScriptElement).src).pathname),
-                  ),
-              },
-              null,
-              2,
-            ),
-          );
+          await writeProof("evidence.json", {
+            gatewayRuntime,
+            sessionKey,
+            configuredWorkspaceAvatar: "agent-avatar.png",
+            assistantAvatarCount: await avatar.count(),
+            decodedWidth: await decodedWidth(),
+            visibleBesidePersistedReply: true,
+            servedScripts: await page
+              .locator("script[src]")
+              .evaluateAll((scripts) =>
+                scripts.map((script) => new URL((script as HTMLScriptElement).src).pathname),
+              ),
+          });
         }
       },
     );
