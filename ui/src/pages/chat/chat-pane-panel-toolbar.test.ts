@@ -13,7 +13,6 @@ import {
   mountChatPaneHeader,
   renderPaneHeaderInto,
 } from "./components/chat-pane-header.test-support.ts";
-import type { SidebarPanelDefinition } from "./components/chat-sidebar-region-types.ts";
 import { openSlot, promoteSidebarPanel, setSidebarOpen } from "./sidebar-layout.ts";
 
 it("keeps Layout actions available across plugin panel swaps", async () => {
@@ -22,18 +21,16 @@ it("keeps Layout actions available across plugin panel swaps", async () => {
     sessions: createSessionCapabilityFixture(),
   });
   const slot = "plugin:fixture/notes";
-  const definitions: SidebarPanelDefinition[] = [
-    ...sidebarPanelDefinitions(),
-    {
-      slot,
-      label: "Fixture notes",
-      icon: sidebarPanelDefinitions()[0]!.icon,
-      available: true,
-      content: "Notes",
-      loading: { variant: "files", label: "Loading notes" },
-      empty: { description: "No notes" },
-    },
-  ];
+  const definitions = sidebarPanelDefinitions();
+  definitions.push({
+    slot,
+    label: "Fixture notes",
+    icon: definitions[0]!.icon,
+    available: true,
+    content: "Notes",
+    loading: { variant: "files", label: "Loading notes" },
+    empty: { description: "No notes" },
+  });
   state.sidebarLayout = promoteSidebarPanel(openSlot({ columns: [] }, slot), slot);
   const container = document.body.appendChild(document.createElement("div"));
   onTestFinished(() => container.remove());
@@ -163,8 +160,10 @@ it("keeps a native external panel link when it is the only Layout action", async
     expect(mounted.container.querySelector('a[aria-label="Open panel"]')).not.toBeNull(),
   );
   const link = mounted.container.querySelector<HTMLAnchorElement>('a[aria-label="Open panel"]')!;
-  expect(link.href).toBe("https://example.test/panel");
-  expect(link.target).toBe("_blank");
-  expect(link.rel).toBe("noopener");
+  expect(link).toMatchObject({
+    href: "https://example.test/panel",
+    target: "_blank",
+    rel: "noopener",
+  });
   expect(link.closest(".oc-menu")?.matches(":popover-open")).toBe(true);
 });

@@ -18,39 +18,28 @@ import {
 } from "./chat-pane.test-support.ts";
 import { refreshPageChat } from "./chat-state-refresh.ts";
 
+const responseMethods = [
+  "chat.history",
+  "chat.startup",
+  "models.authStatus",
+  "models.list",
+  "sessions.describe",
+  "sessions.list",
+  "sessions.patch",
+  "environments.status",
+] as const;
+
 export function createMountedPanes(
   rows: GatewaySessionRow[],
   agentId = "main",
   readBarrier?: Promise<void>,
-  responses?: Partial<
-    Record<
-      | "chat.history"
-      | "chat.startup"
-      | "models.authStatus"
-      | "models.list"
-      | "sessions.describe"
-      | "sessions.list"
-      | "sessions.patch"
-      | "environments.status",
-      GatewayRequestHandler
-    >
-  >,
+  responses?: Partial<Record<(typeof responseMethods)[number], GatewayRequestHandler>>,
 ) {
   const client = createTestGatewayClient(async (method, raw, requestOptions) => {
-    if (
-      method === "chat.history" ||
-      method === "chat.startup" ||
-      method === "models.authStatus" ||
-      method === "models.list" ||
-      method === "sessions.describe" ||
-      method === "sessions.list" ||
-      method === "sessions.patch" ||
-      method === "environments.status"
-    ) {
-      const response = responses?.[method];
-      if (response) {
-        return response(method, raw, requestOptions);
-      }
+    const key = responseMethods.find((candidate) => candidate === method);
+    const response = key && responses?.[key];
+    if (response) {
+      return response(method, raw, requestOptions);
     }
     const params = asOptionalRecord(raw);
     const row = rows.find(
@@ -58,37 +47,33 @@ export function createMountedPanes(
         entry.key === (params?.sessionKey ?? params?.key) &&
         (!params?.agentId || entry.agentId === params.agentId),
     );
-    if (method === "users.list") {
-      return { profiles: [] };
+    switch (method) {
+      case "users.list":
+        return { profiles: [] };
+      case "models.list":
+        return { models: [] };
+      case "agents.list":
+        return { defaultId: "main", mainKey: "main", agents: [{ id: "main" }, { id: "research" }] };
+      case "agent.identity.get":
+        return { agentId: params?.agentId, name: "Assistant" };
+      case "sessions.subscribe":
+        return { subscribed: true };
+      case "sessions.list":
+        await readBarrier;
+        return sessionsResult(
+          rows.filter((entry) => entry.agentId === "main"),
+          1,
+        );
+      case "sessions.describe":
+        await readBarrier;
+        return { session: row ?? null };
+      case "chat.history":
+      case "chat.startup":
+        await readBarrier;
+        return { messages: [], sessionInfo: row, sessionId: row?.sessionId };
+      default:
+        return {};
     }
-    if (method === "models.list") {
-      return { models: [] };
-    }
-    if (method === "agents.list") {
-      return { defaultId: "main", mainKey: "main", agents: [{ id: "main" }, { id: "research" }] };
-    }
-    if (method === "agent.identity.get") {
-      return { agentId: params?.agentId, name: "Assistant" };
-    }
-    if (method === "sessions.list") {
-      await readBarrier;
-      return sessionsResult(
-        rows.filter((entry) => entry.agentId === "main"),
-        1,
-      );
-    }
-    if (method === "sessions.subscribe") {
-      return { subscribed: true };
-    }
-    if (method === "sessions.describe") {
-      await readBarrier;
-      return { session: row ?? null };
-    }
-    if (method === "chat.history" || method === "chat.startup") {
-      await readBarrier;
-      return { messages: [], sessionInfo: row, sessionId: row?.sessionId };
-    }
-    return {};
   });
   const fixture = createTestChatPane({ client });
   const context = fixture.pane.context;
@@ -121,9 +106,7 @@ export function createMountedPanes(
     return pane;
   };
   onTestFinished(async () => {
-    for (const pane of panes) {
-      pane.disconnectedCallback();
-    }
+    panes.forEach((pane) => pane.disconnectedCallback());
     runtimeConfig.dispose();
     placementStartup.dispose();
     await vi.dynamicImportSettled();

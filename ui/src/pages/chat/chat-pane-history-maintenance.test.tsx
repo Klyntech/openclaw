@@ -14,11 +14,14 @@ import { subscribeTranscriptScroll } from "./components/chat-transcript-scroll-e
 import {
   installTranscriptDomMocks,
   resetTranscriptTestDom,
+  requireElement,
   resizeObservers,
   transcriptDomState,
-  type TestContentRow,
 } from "./components/chat-transcript.test-support.ts";
-import { mountTestTranscript } from "./test-helpers/chat-transcript-native.tsx";
+import {
+  mountTestTranscript,
+  numberedContentRows,
+} from "./test-helpers/chat-transcript-native.tsx";
 
 beforeEach(installTranscriptDomMocks);
 afterEach(() => {
@@ -32,7 +35,6 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
   "does not request older history or take reader ownership after %s",
   async (movement) => {
     transcriptDomState.measuredRowHeight = 120;
-    // Startup frames and the scroll idle debounce must share the controlled clock.
     vi.useFakeTimers();
     const context = createInitializationContext();
     context.config.subscribe = () => () => {};
@@ -42,11 +44,10 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
     pane.initialize(context);
     document.body.append(pane.element);
     await pane.updateComplete;
-    // Connect normally: the pane lifecycle must supply the scroll-policy owners.
     const state = (pane as unknown as TestChatPane).state;
     state.sessionKey = "agent:main:maintenance-history";
     const request = vi.fn(async () => ({
-      messages: [nativeHistoryMessage(1), nativeHistoryMessage(2)],
+      messages: [1, 2].map((seq) => nativeHistoryMessage(seq)),
       hasMore: false,
       totalMessages: 4,
     }));
@@ -58,11 +59,7 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
     state.chatHasAutoScrolled = true;
     pane.render();
     const props = expectDefined(pane.chatProps, "rendered pane callbacks");
-    const rows: TestContentRow[] = Array.from({ length: 12 }, (_, index) => ({
-      kind: "content",
-      key: `row:${index}`,
-      content: <div>Message {index}</div>,
-    }));
+    const rows = numberedContentRows(12);
     const mounting = mountTestTranscript("maintenance-history", rows, props.transcript);
     await vi.advanceTimersByTimeAsync(0);
     const { container, renderRows, transcript, session } = await mounting;
@@ -123,8 +120,7 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
     maximum = 1400;
 
     if (movement === "native end clamp") {
-      // The browser clamps the current position as the scroll range shrinks,
-      // before viewport observation or any JavaScript scroll write.
+      // Native clamping precedes both viewport observation and JavaScript scroll writes.
       maximum = 760;
       container.scrollTop = maximum;
     } else {
@@ -133,12 +129,8 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
         expect(transcript.scrollToEnd({ behavior: "auto" })).toBe(true);
         expect(container.scrollTop).toBe(800);
       }
-      // TanStack compensates a remeasured row wholly above the viewport, also
-      // while an end command is waiting for its native completion notification.
-      const earlier = expectDefined(
-        container.querySelector<HTMLElement>('[data-index="4"]'),
-        "measured row above the viewport",
-      );
+      // Remeasure above the viewport, including while an end command awaits native completion.
+      const earlier = requireElement(container, '[data-index="4"]');
       Object.defineProperty(earlier, "offsetHeight", { configurable: true, value: 80 });
       for (const observer of resizeObservers) {
         observer.emitTarget(earlier, 800, 80);
@@ -148,11 +140,9 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
     container.dispatchEvent(new Event("scroll"));
     await vi.advanceTimersByTimeAsync(0);
     expect.soft(request).not.toHaveBeenCalled();
-    expect.soft(state.chatFollowLocked).toBe(false);
-    expect.soft(state.chatReadingHistory).toBe(false);
+    expect.soft(state).toMatchObject({ chatFollowLocked: false, chatReadingHistory: false });
 
-    // Native movement without a classified key (e.g. focus navigation) still
-    // owns reader intent after leaving the maintenance target.
+    // Unclassified native movement still owns reader intent outside the maintenance target.
     container.scrollTop = 720;
     container.dispatchEvent(new Event("scroll"));
     await vi.advanceTimersByTimeAsync(0);
@@ -163,7 +153,6 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
       toolResultMaxChars: 2_000,
       offset: 2,
     });
-    expect(state.chatFollowLocked).toBe(true);
-    expect(state.chatReadingHistory).toBe(true);
+    expect(state).toMatchObject({ chatFollowLocked: true, chatReadingHistory: true });
   },
 );
