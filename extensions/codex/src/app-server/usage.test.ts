@@ -5,7 +5,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readCodexAppServerUsage } from "./request.js";
 import { fetchCodexAppServerUsageSnapshot } from "./usage.js";
 
-vi.mock("./request.js", () => ({ readCodexAppServerUsage: vi.fn() }));
+vi.mock("./request.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./request.js")>()),
+  readCodexAppServerUsage: vi.fn(),
+}));
 const readUsage = vi.mocked(readCodexAppServerUsage);
 beforeEach(() => readUsage.mockReset());
 
