@@ -1,5 +1,3 @@
-import { createChangeListeners } from "../../../src/shared/listeners.js";
-
 type Confirmation = {
   frame: HTMLIFrameElement;
   title: string;
@@ -11,8 +9,8 @@ type Confirmation = {
 /** One synchronous admission owner for pending App decisions. */
 export function createMcpAppConfirm() {
   let pending: (Confirmation & { resolve: (accepted: boolean) => void }) | null = null;
-  const listeners = createChangeListeners();
-  const publish = listeners.publish;
+  const listeners = new Set<() => void>();
+  const publish = () => listeners.forEach((notify) => notify());
   function finish(accepted: boolean, restoreFocus = true): void {
     const decision = pending;
     if (!decision) {
@@ -28,7 +26,10 @@ export function createMcpAppConfirm() {
   }
   return {
     read: () => pending,
-    subscribe: listeners.subscribe,
+    subscribe(notify: () => void) {
+      listeners.add(notify);
+      return () => listeners.delete(notify);
+    },
     request(confirmation: Confirmation): Promise<boolean> {
       if (pending || !confirmation.isCurrent()) {
         return Promise.resolve(false);

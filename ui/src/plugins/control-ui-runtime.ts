@@ -16,7 +16,6 @@ import type {
   ControlUiReplacement,
   ControlUiSurface,
 } from "../../../src/plugin-sdk/control-ui.js";
-import { createChangeListeners } from "../../../src/shared/listeners.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import { readGatewayOperatorAccess } from "../app/operator-access.ts";
@@ -71,7 +70,7 @@ export class ControlUiPluginRuntime implements ControlUiPluginCapability {
   private readonly owners = new Map<string, ControlUiPluginOwner>();
   private readonly preloads = new ControlUiPluginAssetPreloads();
   private readonly selected = new Map<ControlUiSurface, { key: string; signal: AbortSignal }>();
-  private readonly listeners = createChangeListeners();
+  private readonly listeners = new Set<() => void>();
   private readonly loadingOwners = new Set<Omit<ControlUiPluginOwner, "host">>();
   private loadingCatalog: "pending" | Set<string> | null = null;
   private catalogStatus: "pending" | "complete" | "failed" = "pending";
@@ -169,7 +168,10 @@ export class ControlUiPluginRuntime implements ControlUiPluginCapability {
     await this.refresh();
   }
 
-  readonly subscribe = this.listeners.subscribe;
+  subscribe(listener: () => void): ControlUiDisposer {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   invalidate(owner: Omit<ControlUiPluginOwner, "host">): void {
     if (!this.isCurrent(owner)) {
@@ -582,7 +584,11 @@ export class ControlUiPluginRuntime implements ControlUiPluginCapability {
     this.publish();
   }
 
-  private readonly publish = this.listeners.publish;
+  private publish(): void {
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
 
   private disposeOwner(owner: Omit<ControlUiPluginOwner, "host">): void {
     for (const { signal } of owner.contributions.replacements.values()) {

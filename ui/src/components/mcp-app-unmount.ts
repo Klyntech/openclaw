@@ -1,5 +1,3 @@
-import { createChangeListeners } from "../../../src/shared/listeners.js";
-
 type McpAppUnmountTarget = Element & {
   restartAfterTeardown(): void;
   teardown(): Promise<void>;
@@ -29,7 +27,7 @@ export function createMcpAppUnmountGate<Value = unknown>(invalidate?: () => void
   let renderedValue: Value;
   let pending = false;
   let restartTargets: McpAppUnmountTarget[] | null = null;
-  const listeners = createChangeListeners();
+  const listeners = new Set<() => void>();
 
   function apply(key: McpAppUnmountKey, renderValue: () => Value): Value {
     renderedValue = renderValue();
@@ -80,14 +78,19 @@ export function createMcpAppUnmountGate<Value = unknown>(invalidate?: () => void
       pending = false;
       restartTargets = targets;
       invalidate?.();
-      listeners.publish();
+      for (const listener of listeners) {
+        listener();
+      }
     });
     return renderedValue;
   }
 
   return {
     render,
-    subscribe: listeners.subscribe,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     get retiring() {
       return pending || restartTargets !== null;
     },
