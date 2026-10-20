@@ -86,15 +86,14 @@ it.each(["forced", "uncertain"] as const)(
     }
     const error = await work;
     expect(hasCommandProcessCleanupError(error)).toBe(cleanupResult === "uncertain");
+    expect(collectNestedErrorCandidates(error)).toContain(original);
     if (cleanupResult === "uncertain") {
-      expect(collectNestedErrorCandidates(error)).toContain(original);
       expect(boundary.admission).not.toHaveBeenCalled();
       expect(restore).not.toHaveBeenCalled();
       expect(complete).toHaveBeenCalledExactlyOnceWith(false, { preserveState: true });
       expect(boundary.prepareFailure).not.toHaveBeenCalled();
     } else {
       expect(error).toBe(prepared);
-      expect(collectNestedErrorCandidates(error)).toContain(original);
       expect(restore).toHaveBeenCalledOnce();
       expect(complete).toHaveBeenCalledOnce();
       expect(boundary.prepareFailure).toHaveBeenCalledExactlyOnceWith(
@@ -115,7 +114,7 @@ it.each([
 ])(
   "preserves recovery metadata without authorizing uncertain cleanup ($uncertain, reporting=$reporting)",
   async ({ uncertain, reporting }) => {
-    const report = vi.spyOn(defaultRuntime, "error").mockImplementation(() => {});
+    using report = vi.spyOn(defaultRuntime, "error").mockImplementation(() => {});
     const original = new UpdatePreMutationError(
       "node-runtime-preflight",
       "Select a supported Node",
@@ -140,24 +139,20 @@ it.each([
       root: "/synthetic",
       originalRecovery,
     });
-    try {
-      if (uncertain) {
-        await expect(work).rejects.toBe(error);
-        expect(originalRecovery).not.toHaveBeenCalled();
-        expect(report).not.toHaveBeenCalled();
-      } else {
-        const { result, failure } = await work;
-        expect(failure.cause).toBe(error);
-        expect(originalRecovery).toHaveBeenCalledOnce();
-        expect(result.failedStep).toMatchObject({
-          name: "node-runtime-preflight",
-          recoverySteps: original.recoverySteps,
-          failureFacts: original.failureFacts,
-        });
-        expect(result.steps).toEqual([result.failedStep]);
-      }
-    } finally {
-      report.mockRestore();
+    if (uncertain) {
+      await expect(work).rejects.toBe(error);
+      expect(originalRecovery).not.toHaveBeenCalled();
+      expect(report).not.toHaveBeenCalled();
+    } else {
+      const { result, failure } = await work;
+      expect(failure.cause).toBe(error);
+      expect(originalRecovery).toHaveBeenCalledOnce();
+      expect(result.failedStep).toMatchObject({
+        name: "node-runtime-preflight",
+        recoverySteps: original.recoverySteps,
+        failureFacts: original.failureFacts,
+      });
+      expect(result.steps).toEqual([result.failedStep]);
     }
   },
 );

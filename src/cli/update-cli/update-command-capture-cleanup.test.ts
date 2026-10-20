@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import type { RecoveryCleanupReport } from "../../commands/doctor-session-sqlite-recovery-inventory.js";
 import { resolveUpdateCaptureRoot } from "../../infra/update-capture-paths.js";
 import {
   UPDATE_CAPTURE_PRIVACY_MARKER,
@@ -96,63 +97,35 @@ async function runCleanup(options: { dryRun?: boolean; yes?: boolean }) {
   const exit = vi.spyOn(defaultRuntime, "exit").mockImplementation(() => undefined as never);
   await updateCleanupCommand({ ...options, json: true });
   expect(exit).not.toHaveBeenCalled();
-  const report = writeJson.mock.calls.at(-1)?.[0] as {
-    status: string;
-    artifacts: Array<{
-      kind?: string;
-      path: string;
-      outcome: string;
-      reason: string;
-      bytes: number;
-    }>;
-  };
+  const report = writeJson.mock.calls.at(-1)?.[0] as RecoveryCleanupReport;
   return {
     status: report.status,
     captures: Object.fromEntries(
       report.artifacts
         .filter((item) => item.kind === "update-capture")
-        .map((item) => [
-          item.path,
-          { outcome: item.outcome, reason: item.reason, bytes: item.bytes },
+        .map(({ path: directory, outcome, reason, bytes }) => [
+          directory,
+          { outcome, reason, bytes },
         ]),
     ),
   };
 }
 
-const expectedPreview = (captures: Record<string, string>) => ({
-  [captures.superseded!]: {
-    outcome: "candidate",
-    reason: "superseded-update-capture",
-    bytes: 1038,
-  },
-  [captures.unsealed!]: { outcome: "candidate", reason: "unsealed-update-capture", bytes: 1035 },
-  [captures.alreadyCurrent!]: {
-    outcome: "candidate",
-    reason: "superseded-update-capture",
-    bytes: 1038,
-  },
-  [captures.failedBaseline!]: {
-    outcome: "protected",
-    reason: "unresolved-failed-update",
-    bytes: 1038,
-  },
-  [captures.latest!]: {
-    outcome: "protected",
-    reason: "awaiting-later-completed-update",
-    bytes: 1035,
-  },
-  [captures.unfinished!]: { outcome: "protected", reason: "unfinished-update-run", bytes: 1038 },
-  [captures.unattributed!]: {
-    outcome: "protected",
-    reason: "unmanifested-update-capture",
-    bytes: 1038,
-  },
-  [captures.unmarked!]: {
-    outcome: "protected",
-    reason: "unmanifested-update-capture",
-    bytes: 1003,
-  },
-});
+const expectedPreview = (captures: Record<string, string>) =>
+  Object.fromEntries(
+    (
+      [
+        ["superseded", "candidate", "superseded-update-capture", 1038],
+        ["unsealed", "candidate", "unsealed-update-capture", 1035],
+        ["alreadyCurrent", "candidate", "superseded-update-capture", 1038],
+        ["failedBaseline", "protected", "unresolved-failed-update", 1038],
+        ["latest", "protected", "awaiting-later-completed-update", 1035],
+        ["unfinished", "protected", "unfinished-update-run", 1038],
+        ["unattributed", "protected", "unmanifested-update-capture", 1038],
+        ["unmarked", "protected", "unmanifested-update-capture", 1003],
+      ] as const
+    ).map(([label, outcome, reason, bytes]) => [captures[label], { outcome, reason, bytes }]),
+  );
 
 it.each(["current", "pre-migration"] as const)(
   "previews %s update captures with their classification and bytes without removing them",
@@ -210,6 +183,7 @@ it.each(["current", "pre-migration"] as const)(
   async (location) => {
     await withCaptureHistory(async (_captures, root) => {
       const now = Date.now();
+      const configPath = path.join(root, "config.json");
       const doctors = [5, 4, 3, 2, 1].map((age) => {
         const runId = `doctor-${randomUUID()}`;
         const directory = writeCapture(root, runId, true);
@@ -223,18 +197,18 @@ it.each(["current", "pre-migration"] as const)(
             runId,
             installRoot: root,
             stateDir: path.dirname(root),
-            configPath: path.join(root, "config.json"),
-            configPaths: [path.join(root, "config.json")],
+            configPath,
+            configPaths: [configPath],
             creator: { host: "fixture", pid: 1, startIdentity: "1" },
             drivers: [],
             createdAt: new Date(now - age * 86_400_000).toISOString(),
-            roots: [path.join(root, "config.json")],
+            roots: [configPath],
             excludedRoots: [],
-            protectedPaths: [path.join(root, "config.json")],
+            protectedPaths: [configPath],
             entries: [
               {
                 kind: "missing",
-                sourcePath: path.join(root, "config.json"),
+                sourcePath: configPath,
                 sqlite: false,
                 directory: false,
               },

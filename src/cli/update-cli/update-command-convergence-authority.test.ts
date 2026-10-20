@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import type { ConfigFileSnapshot } from "../../config/types.openclaw.js";
 import * as updateCheck from "../../infra/update-check.js";
 import { DoctorMaintenanceRefusalError } from "../../infra/update-doctor-result.js";
 import { readGitRuntimeArtifactIdentity } from "../../infra/update-git-runtime.js";
@@ -11,6 +10,7 @@ import * as pluginRecords from "../../plugins/installed-plugin-index-records.js"
 import * as pluginLifecycle from "../../plugins/plugin-lifecycle-lease.js";
 import { withCommandProcessScope } from "../../process/exec-spawn.js";
 import { VERSION } from "../../version.js";
+import { createUpdateCliBaseSnapshot } from "./update-cli-config.test-support.js";
 import type { PostCorePluginUpdateResult } from "./update-command-plugins.js";
 
 const mocks = vi.hoisted(() => ({
@@ -59,20 +59,7 @@ import * as sourceRuntime from "./update-command-runtime.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-const snapshot: ConfigFileSnapshot = {
-  path: "/isolated/openclaw.json",
-  exists: true,
-  raw: "{}",
-  valid: true,
-  parsed: {},
-  sourceConfig: {},
-  resolved: {},
-  runtimeConfig: {},
-  config: {},
-  warnings: [],
-  issues: [],
-  legacyIssues: [],
-};
+const snapshot = { ...createUpdateCliBaseSnapshot({}), path: "/isolated/openclaw.json" };
 const pluginUpdate: PostCorePluginUpdateResult = {
   status: "ok",
   changed: true,
@@ -81,18 +68,28 @@ const pluginUpdate: PostCorePluginUpdateResult = {
   integrityDrifts: [],
   warnings: [],
 };
+const unchangedPluginUpdate = () => ({ ...pluginUpdate, changed: false });
+const unchangedCandidate = () => ({
+  pluginUpdate: unchangedPluginUpdate(),
+  configSnapshot: snapshot,
+});
+function doctorOutput(args: string[]) {
+  return {
+    stdout: args.includes("--lint")
+      ? JSON.stringify({ ok: true, checksRun: 1, checksSkipped: 0, findings: [] })
+      : "",
+    stderr: "",
+  };
+}
 
 beforeEach(() => {
   vi.mocked(shared.readPackageVersion).mockResolvedValue("2026.9.4");
   mocks.readConfig.mockReset().mockResolvedValue(snapshot);
   mocks.resolveEntrypoint.mockReset().mockResolvedValue("/isolated/dist/index.js");
   mocks.convergeCandidate.mockReset().mockResolvedValue({ pluginUpdate, configSnapshot: snapshot });
-  mocks.runExec.mockReset().mockImplementation(async (_command, args: string[]) => ({
-    stdout: args.includes("--lint")
-      ? JSON.stringify({ ok: true, checksRun: 1, checksSkipped: 0, findings: [] })
-      : "",
-    stderr: "",
-  }));
+  mocks.runExec
+    .mockReset()
+    .mockImplementation(async (_command, args: string[]) => doctorOutput(args));
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -100,13 +97,13 @@ afterEach(() => {
 });
 
 type ConvergenceParams = Parameters<typeof convergeUpdatePlugins>[0];
-function convergenceParams({
-  result,
+function converge({
+  result = {},
   ...overrides
 }: Omit<Partial<ConvergenceParams>, "result"> & {
-  result: Partial<ConvergenceParams["result"]>;
-}): ConvergenceParams {
-  return {
+  result?: Partial<ConvergenceParams["result"]>;
+}) {
+  return convergeUpdatePlugins({
     root: "/isolated",
     result: {
       status: "ok",
@@ -127,7 +124,7 @@ function convergenceParams({
     startedAt: Date.now(),
     updateStepTimeoutMs: 5_000,
     ...overrides,
-  };
+  });
 }
 
 function doctorOperation(args: string[]) {
@@ -178,12 +175,7 @@ describe("candidate convergence Doctor dispatch authority", () => {
         configSnapshot: snapshot,
       };
     });
-    const { resultWithPostUpdate } = await convergeUpdatePlugins(
-      convergenceParams({
-        candidateRuntime: true,
-        result: {},
-      }),
-    );
+    const { resultWithPostUpdate } = await converge({ candidateRuntime: true });
     expect(resultWithPostUpdate.status).toBe("ok");
     const report = renderUpdateRunReport(updateRunReportInputFromResult(resultWithPostUpdate));
     expect(report.lines.filter((line) => line.startsWith("Warning: "))).toEqual([
@@ -199,12 +191,10 @@ describe("candidate convergence Doctor dispatch authority", () => {
       error: "x",
       failureFacts: [],
     });
-    const { resultWithPostUpdate } = await convergeUpdatePlugins(
-      convergenceParams({
-        result: { mode: "npm", before: { version: VERSION }, after: { version: "2026.9.4" } },
-        downgradeRisk: true,
-      }),
-    );
+    const { resultWithPostUpdate } = await converge({
+      result: { mode: "npm", before: { version: VERSION }, after: { version: "2026.9.4" } },
+      downgradeRisk: true,
+    });
     expect(resultWithPostUpdate).toMatchObject({
       status: "error",
       steps: [
@@ -272,25 +262,20 @@ describe("candidate convergence Doctor dispatch authority", () => {
       vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", undefined);
       vi.stubEnv("OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH", undefined);
       vi.mocked(shared.readPackageVersion).mockResolvedValue(VERSION);
-      mocks.convergeCandidate.mockResolvedValue({
-        pluginUpdate: { ...pluginUpdate, changed: false },
-        configSnapshot: snapshot,
-      });
+      mocks.convergeCandidate.mockResolvedValue(unchangedCandidate());
 
-      const { resultWithPostUpdate } = await convergeUpdatePlugins(
-        convergenceParams({
+      const { resultWithPostUpdate } = await converge({
+        root,
+        candidateRuntime: true,
+        coreAlreadyCurrent: true,
+        result: {
           root,
-          candidateRuntime: true,
-          coreAlreadyCurrent: true,
-          result: {
-            root,
-            status: "skipped",
-            reason: "already-current",
-            mode: installation === "package" ? "npm" : "git",
-            sourceRuntimePrepared: installation === "prepared source" ? true : undefined,
-          },
-        }),
-      );
+          status: "skipped",
+          reason: "already-current",
+          mode: installation === "package" ? "npm" : "git",
+          sourceRuntimePrepared: installation === "prepared source" ? true : undefined,
+        },
+      });
 
       expect(resultWithPostUpdate).toMatchObject({ status: "skipped", reason: "already-current" });
       expect(mocks.convergeCandidate).toHaveBeenCalledOnce();
@@ -321,7 +306,7 @@ describe("candidate convergence Doctor dispatch authority", () => {
         `import fs from "node:fs/promises";
 await fs.writeFile(${JSON.stringify(executed)}, String(process.pid));
 ${scenario === "changed-during" ? `await fs.writeFile(${JSON.stringify(writer)}, "export const generation = 2;\\n");` : ""}
-await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.stringify(JSON.stringify({ ...pluginUpdate, changed: false }))});
+await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.stringify(JSON.stringify(unchangedPluginUpdate()))});
 `,
       );
       const activated = await readGitRuntimeArtifactIdentity(root);
@@ -331,25 +316,20 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         vi.spyOn(sourceRuntime, "completeSourceUpdateRuntime").mockResolvedValue({
           changed: false,
         });
-        mocks.convergeCandidate.mockResolvedValue({
-          pluginUpdate: { ...pluginUpdate, changed: false },
-          configSnapshot: snapshot,
-        });
+        mocks.convergeCandidate.mockResolvedValue(unchangedCandidate());
       }
-      const { resultWithPostUpdate: result } = await convergeUpdatePlugins(
-        convergenceParams({
-          candidateRuntime,
-          result: {
-            root,
-            before: { sha: "same-commit", version: VERSION },
-            after: { sha: "same-commit", version: VERSION },
-            gitRuntime: activated,
-          },
+      const { resultWithPostUpdate: result } = await converge({
+        candidateRuntime,
+        result: {
           root,
-          channel: "dev",
-          packageUpdateNodeRunner: process.execPath,
-        }),
-      );
+          before: { sha: "same-commit", version: VERSION },
+          after: { sha: "same-commit", version: VERSION },
+          gitRuntime: activated,
+        },
+        root,
+        channel: "dev",
+        packageUpdateNodeRunner: process.execPath,
+      });
       if (candidateRuntime) {
         await expect(fs.stat(executed)).rejects.toMatchObject({ code: "ENOENT" });
       } else {
@@ -398,27 +378,25 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
           expect(root).toBe("/isolated");
           expect(channel).toBe("stable");
           current = !revoked;
-          return { resumed: true, pluginUpdate: { ...pluginUpdate, changed: false } };
+          return { resumed: true, pluginUpdate: unchangedPluginUpdate() };
         });
-      const outcome = convergeUpdatePlugins(
-        convergenceParams({
-          result: {
-            mode: runtime === "npm" ? "npm" : "git",
-            before: { version: VERSION, sha: "old-checkout", buildId: "updater-build" },
-            after: {
-              version,
-              sha: rebuilt ? "old-checkout" : "target-checkout",
-              buildId: "published-build",
-            },
+      const outcome = converge({
+        result: {
+          mode: runtime === "npm" ? "npm" : "git",
+          before: { version: VERSION, sha: "old-checkout", buildId: "updater-build" },
+          after: {
+            version,
+            sha: rebuilt ? "old-checkout" : "target-checkout",
+            buildId: "published-build",
           },
-          downgradeRisk: true,
-          assertCurrent: () => {
-            if (!current) {
-              throw authorityRefusal;
-            }
-          },
-        }),
-      );
+        },
+        downgradeRisk: true,
+        assertCurrent: () => {
+          if (!current) {
+            throw authorityRefusal;
+          }
+        },
+      });
       if (revoked) {
         await expect(outcome).rejects.toBe(authorityRefusal);
         expect(mocks.runExec).not.toHaveBeenCalled();
@@ -451,12 +429,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
           events.push("target-declined-consent");
           return { stdout: "Usage: openclaw update [--yes]", stderr: "" };
         }
-        return {
-          stdout: args.includes("--lint")
-            ? JSON.stringify({ ok: true, checksRun: 1, checksSkipped: 0, findings: [] })
-            : "",
-          stderr: "",
-        };
+        return doctorOutput(args);
       });
       // Exercise the real target capability refusal, including its resumed:false outcome.
       const delegate = vi.spyOn(postCore, "continuePostCoreUpdateInFreshProcess");
@@ -478,28 +451,26 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         .spyOn(plugins, "updatePluginsAfterCoreUpdate")
         .mockImplementation(async () => {
           events.push("local-plugins");
-          return { ...pluginUpdate, changed: false, assessment: { kind: "no-payload-repair" } };
+          return { ...unchangedPluginUpdate(), assessment: { kind: "no-payload-repair" } };
         });
       const actualResume = await vi.importActual<typeof import("./update-command-resume.js")>(
         "./update-command-resume.js",
       );
       mocks.convergeCandidate.mockImplementation(actualResume.convergePostCoreUpdatePlugins);
-      const result = await convergeUpdatePlugins(
-        convergenceParams({
-          coreAlreadyCurrent: retainedDifferentRuntime,
-          result: {
-            status: retainedDifferentRuntime ? "skipped" : "ok",
-            ...(retainedDifferentRuntime ? { reason: "already-current" } : {}),
-            before: { version: VERSION, sha: "old-checkout" },
-            after: {
-              version: retainedDifferentRuntime ? "2026.9.4" : VERSION,
-              sha: "target-checkout",
-            },
+      const result = await converge({
+        coreAlreadyCurrent: retainedDifferentRuntime,
+        result: {
+          status: retainedDifferentRuntime ? "skipped" : "ok",
+          ...(retainedDifferentRuntime ? { reason: "already-current" } : {}),
+          before: { version: VERSION, sha: "old-checkout" },
+          after: {
+            version: retainedDifferentRuntime ? "2026.9.4" : VERSION,
+            sha: "target-checkout",
           },
-          downgradeRisk: retainedDifferentRuntime,
-          opts: { json: true, yes: true, acceptCapabilities: true },
-        }),
-      );
+        },
+        downgradeRisk: retainedDifferentRuntime,
+        opts: { json: true, yes: true, acceptCapabilities: true },
+      });
       expect(delegate).toHaveBeenCalledOnce();
       await expect(delegate.mock.results[0]?.value).resolves.toMatchObject({ resumed: false });
       expect(mocks.convergeCandidate).toHaveBeenCalledTimes(retainedDifferentRuntime ? 0 : 1);
@@ -557,57 +528,50 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
           configSnapshot: snapshot,
         };
       });
-      try {
-        const result = await convergeUpdatePlugins(
-          convergenceParams({
-            candidateRuntime: true,
-            coreAlreadyCurrent: true,
-            result: {
-              status: "skipped",
-              reason: "already-current",
-            },
-            packageUpdateNodeRunner: "/selected/node",
-            beforeRuntimePublication: park,
-            beforeDoctor: park,
-            assertCurrent,
-          }),
+      const result = await converge({
+        candidateRuntime: true,
+        coreAlreadyCurrent: true,
+        result: {
+          status: "skipped",
+          reason: "already-current",
+        },
+        packageUpdateNodeRunner: "/selected/node",
+        beforeRuntimePublication: park,
+        beforeDoctor: park,
+        assertCurrent,
+      });
+      expect(runtime).toHaveBeenCalledOnce();
+      expect(mocks.convergeCandidate).toHaveBeenCalledOnce();
+      expect(delegate).not.toHaveBeenCalled();
+      expect(park).toHaveBeenCalledOnce();
+      expect(events).toEqual(
+        changed === "runtime"
+          ? ["park", "publish", "candidate-plugins"]
+          : ["candidate-plugins", "park"],
+      );
+      expect(result.resultWithPostUpdate.status).toBe("ok");
+      expect(result.resultWithPostUpdate.steps).toEqual(
+        changed === "runtime"
+          ? [expect.objectContaining({ name: "source runtime publication", exitCode: 0 })]
+          : [
+              expect.objectContaining({
+                name: "post-plugin doctor",
+                exitCode: 0,
+                deferredInspectionCheckIds: null,
+              }),
+            ],
+      );
+      if (changed === "plugins") {
+        expect(mocks.runExec.mock.calls.map(([, args]) => doctorOperation(args))).toEqual([
+          "repair",
+          "validate",
+          "readiness",
+        ]);
+        expect(mocks.runExec.mock.calls.every(([command]) => command === "/selected/node")).toBe(
+          true,
         );
-        expect(runtime).toHaveBeenCalledOnce();
-        expect(mocks.convergeCandidate).toHaveBeenCalledOnce();
-        expect(delegate).not.toHaveBeenCalled();
-        expect(park).toHaveBeenCalledOnce();
-        expect(events).toEqual(
-          changed === "runtime"
-            ? ["park", "publish", "candidate-plugins"]
-            : ["candidate-plugins", "park"],
-        );
-        expect(result.resultWithPostUpdate.status).toBe("ok");
-        expect(result.resultWithPostUpdate.steps).toEqual(
-          changed === "runtime"
-            ? [expect.objectContaining({ name: "source runtime publication", exitCode: 0 })]
-            : [
-                expect.objectContaining({
-                  name: "post-plugin doctor",
-                  exitCode: 0,
-                  deferredInspectionCheckIds: null,
-                }),
-              ],
-        );
-        if (changed === "plugins") {
-          expect(mocks.runExec.mock.calls.map(([, args]) => doctorOperation(args))).toEqual([
-            "repair",
-            "validate",
-            "readiness",
-          ]);
-          expect(mocks.runExec.mock.calls.every(([command]) => command === "/selected/node")).toBe(
-            true,
-          );
-        }
-        expect(process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION).toBe("0.0.1");
-      } finally {
-        runtime.mockRestore();
-        delegate.mockRestore();
       }
+      expect(process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION).toBe("0.0.1");
     },
   );
 
@@ -658,13 +622,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
       if (boundary === "validation-replacement" && operation === "validate") {
         currentOwner = {};
       }
-      return {
-        stdout:
-          operation === "readiness"
-            ? JSON.stringify({ ok: true, checksRun: 1, checksSkipped: 0, findings: [] })
-            : "",
-        stderr: "",
-      };
+      return doctorOutput(args);
     });
     if (boundary === "config-read-revocation") {
       mocks.readConfig.mockImplementationOnce(async () => {
@@ -673,22 +631,20 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         return snapshot;
       });
     }
-    const outcome = convergeUpdatePlugins(
-      convergenceParams({
-        candidateRuntime: true,
-        result: { mode: "npm" },
-        assertCurrent,
-        beforeDoctor: async () => {
-          await Promise.resolve();
-          if (boundary === "maintenance-deferred" || boundary === "maintenance-at-risk") {
-            throw maintenanceRefusal;
-          }
-          if (boundary === "maintenance-first-refusal") {
-            refusalArmed = true;
-          }
-        },
-      }),
-    );
+    const outcome = converge({
+      candidateRuntime: true,
+      result: { mode: "npm" },
+      assertCurrent,
+      beforeDoctor: async () => {
+        await Promise.resolve();
+        if (boundary === "maintenance-deferred" || boundary === "maintenance-at-risk") {
+          throw maintenanceRefusal;
+        }
+        if (boundary === "maintenance-first-refusal") {
+          refusalArmed = true;
+        }
+      },
+    });
     if (boundary === "maintenance-deferred") {
       const completed = await outcome;
       expect(completed.resultWithPostUpdate).toMatchObject({

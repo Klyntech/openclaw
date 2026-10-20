@@ -23,27 +23,21 @@ export async function prepareCandidateAuthorityRuntime(root: string) {
     }
     const dependencies = path.resolve("node_modules");
     const fixtureDependencies = path.join(root, "node_modules");
+    const link = (source: string, name: string, directory: boolean) =>
+      fs.promises.symlink(
+        source,
+        path.join(fixtureDependencies, name),
+        directory ? (process.platform === "win32" ? "junction" : "dir") : "file",
+      );
     await fs.promises.mkdir(fixtureDependencies);
     for (const entry of await fs.promises.readdir(dependencies, { withFileTypes: true })) {
       if (entry.name === "openclaw" || (!entry.isDirectory() && !entry.isSymbolicLink())) {
         continue;
       }
       const source = path.join(dependencies, entry.name);
-      await fs.promises.symlink(
-        source,
-        path.join(fixtureDependencies, entry.name),
-        (await fs.promises.stat(source)).isDirectory()
-          ? process.platform === "win32"
-            ? "junction"
-            : "dir"
-          : "file",
-      );
+      await link(source, entry.name, (await fs.promises.stat(source)).isDirectory());
     }
-    await fs.promises.symlink(
-      root,
-      path.join(fixtureDependencies, "openclaw"),
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    await link(root, "openclaw", true);
     // Doctor resolves its loaded module's package before argv/cwd. A package
     // boundary prevents it from finding and rebuilding the source checkout's UI.
     await fs.promises.copyFile(path.resolve("package.json"), path.join(root, "package.json"));
@@ -56,21 +50,16 @@ export async function prepareCandidateAuthorityRuntime(root: string) {
       distWorkerPath,
       root: installedRoot,
     });
+  const doctorHealth = sibling(
+    "../../extensions/memory-core/doctor-health-api",
+    "extensions/memory-core/doctor-health-api.js",
+  );
   return {
     worker: resolveRuntimeWorkerUrl({ ...workerDeclaration, root: installedRoot }),
     cli: sibling("../entry", "entry.js"),
     runtime: sibling("../runtime", "runtime.js"),
     doctorResult: sibling("update-doctor-result", "infra/update-doctor-result.js"),
-    bundledPluginsDir: path.dirname(
-      path.dirname(
-        fileURLToPath(
-          sibling(
-            "../../extensions/memory-core/doctor-health-api",
-            "extensions/memory-core/doctor-health-api.js",
-          ),
-        ),
-      ),
-    ),
+    bundledPluginsDir: path.dirname(path.dirname(fileURLToPath(doctorHealth))),
   };
 }
 

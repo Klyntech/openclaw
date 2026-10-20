@@ -36,7 +36,7 @@ export function registerConvergenceCompletionTests({
   ] as const)(
     "completes unchanged plugins with deferred model retirement once ($runtime, current=$coreAlreadyCurrent)",
     async ({ runtime, coreAlreadyCurrent }) => {
-      const resumesTarget = runtime === "resumed" || (runtime === "current" && !coreAlreadyCurrent);
+      const resumesTarget = runtime === "resumed";
       const installedVersion = runtime === "resumed" ? "2026.9.4" : VERSION;
       vi.mocked(readPackageVersion).mockResolvedValue(installedVersion);
       const run = createUpdateRun({ trigger: "cli" });
@@ -65,8 +65,7 @@ export function registerConvergenceCompletionTests({
         await fs.writeFile(path.join(handoffDir, "handoff.json"), '{"completionOwner":"parent"}');
         vi.stubEnv("OPENCLAW_UPDATE_POST_CORE_RESULT_PATH", path.join(handoffDir, "plugins.json"));
         vi.mocked(continuePostCoreUpdateInFreshProcess).mockImplementationOnce(async () => {
-          // Run the actual resume producer, not a canned child result. The existing
-          // transport mock observes when a modern child publishes to its parent.
+          // Exercise the resume producer and observe its publication to the parent.
           await withUpdateEnv({ OPENCLAW_UPDATE_RUN_ID: run.runId }, () =>
             resumePostCoreUpdate({
               root: "/tmp/openclaw",
@@ -110,8 +109,7 @@ export function registerConvergenceCompletionTests({
         beforeDoctor,
       });
       expect(updatePluginsAfterCoreUpdate).toHaveBeenCalledOnce();
-      expect(completePostCorePluginUpdate).toHaveBeenCalledOnce();
-      expect(completePostCorePluginUpdate).toHaveBeenCalledWith(
+      expect(completePostCorePluginUpdate).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
           pluginUpdate: expect.objectContaining({ changed: false }),
           nodeRunner: "/selected/node",
@@ -129,11 +127,7 @@ export function registerConvergenceCompletionTests({
           },
         }),
       );
-      if (resumesTarget) {
-        expect(continuePostCoreUpdateInFreshProcess).toHaveBeenCalledOnce();
-      } else {
-        expect(continuePostCoreUpdateInFreshProcess).not.toHaveBeenCalled();
-      }
+      expect(continuePostCoreUpdateInFreshProcess).toHaveBeenCalledTimes(resumesTarget ? 1 : 0);
     },
   );
 }
