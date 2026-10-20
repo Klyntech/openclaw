@@ -13,7 +13,7 @@ import {
   saveCronQuarantinedJobs,
   saveCronStore,
 } from "./store.js";
-import { makeStore } from "./store.test-support.js";
+import { expectPathMissing, makeStore } from "./store.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -21,25 +21,14 @@ function makeStorePath() {
   return { storePath: path.join(tempDirs.make("openclaw-cron-quarantine-"), "cron", "jobs.json") };
 }
 
-function resolveLegacyCronQuarantinePath(storePath: string): string {
-  return storePath.replace(/\.json$/, "-quarantine.json");
-}
-
-async function expectPathMissing(targetPath: string): Promise<void> {
-  await expect(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
-}
-
 describe("cron quarantine", () => {
   it("rejects unrecognized historical quarantine files without modifying them", async () => {
     const { storePath } = makeStorePath();
-    const quarantinePath = resolveLegacyCronQuarantinePath(storePath);
+    const quarantinePath = storePath.replace(/\.json$/, "-quarantine.json");
     await fs.mkdir(path.dirname(storePath), { recursive: true });
     await fs.writeFile(
       quarantinePath,
-      JSON.stringify({
-        version: 2,
-        jobs: [{ reason: "old-shape", raw: "keep-me" }],
-      }),
+      JSON.stringify({ version: 2, jobs: [{ reason: "old-shape", raw: "keep-me" }] }),
     );
 
     await expect(loadLegacyCronQuarantineForMigration(storePath)).rejects.toThrow(
@@ -99,7 +88,6 @@ describe("cron quarantine", () => {
 
   it("captures quarantine input and preserves the first recovery timestamp", async () => {
     const { storePath } = makeStorePath();
-    const quarantinePath = resolveLegacyCronQuarantinePath(storePath);
     const entry = { sourceIndex: 0, reason: "missing-schedule", job: { id: "same-row" } };
 
     const saving = saveCronQuarantinedJobs({ storePath, nowMs: 100, entries: [entry] });
@@ -109,64 +97,50 @@ describe("cron quarantine", () => {
     await saveCronQuarantinedJobs({ storePath, nowMs: 200, entries: [entry] });
 
     expect(await loadCronQuarantinedJobs(storePath)).toEqual([{ ...entry, quarantinedAtMs: 100 }]);
-    await expectPathMissing(quarantinePath);
+    await expectPathMissing(storePath.replace(/\.json$/, "-quarantine.json"));
   });
 
-  it("rolls back quarantine records when the cron row update cannot commit", async () => {
-    const { storePath } = makeStorePath();
-    const store = makeStore("atomic-quarantine-job", true);
-    await saveCronStore(storePath, store);
-    const database = openOpenClawStateDatabase().db;
-    database.exec(
-      "CREATE TRIGGER fail_cron_quarantine_update BEFORE UPDATE ON cron_jobs BEGIN SELECT RAISE(ABORT, 'cron update rejected'); END",
-    );
-    try {
-      await expect(
-        saveCronJobsStore(storePath, store, {
-          quarantine: {
-            nowMs: 123,
-            entries: [{ sourceIndex: 0, reason: "invalid-schedule", job: { id: "bad-row" } }],
-          },
-        }),
-      ).rejects.toThrow("cron update rejected");
-      expect(await loadCronQuarantinedJobs(storePath)).toEqual([]);
-      expect((await loadCronStore(storePath)).jobs.map((job) => job.id)).toEqual([
-        "atomic-quarantine-job",
-      ]);
-    } finally {
-      database.exec("DROP TRIGGER fail_cron_quarantine_update");
-    }
-  });
+  it.each([false, true])(
+    "rolls back quarantine changes on failed row update (recovery=%s)",
+    async (recovery) => {
+      const { storePath } = makeStorePath();
+      const jobId = recovery ? "atomic-recovery-job" : "atomic-quarantine-job";
+      const store = makeStore(jobId, true);
+      await saveCronStore(storePath, store);
+      const entry = {
+        sourceIndex: 0,
+        reason: "invalid-schedule" as const,
+        job: { id: recovery ? jobId : "bad-row" },
+      };
+      if (recovery) {
+        await saveCronQuarantinedJobs({ storePath, nowMs: 123, entries: [entry] });
+      }
+      const database = openOpenClawStateDatabase().db;
+      database.exec(
+        "CREATE TRIGGER fail_cron_recovery_update BEFORE UPDATE ON cron_jobs BEGIN SELECT RAISE(ABORT, 'cron recovery rejected'); END",
+      );
+      try {
+        await expect(
+          saveCronJobsStore(
+            storePath,
+            store,
+            recovery
+              ? { deleteQuarantineEntries: [entry] }
+              : { quarantine: { nowMs: 123, entries: [entry] } },
+          ),
+        ).rejects.toThrow("cron recovery rejected");
+        expect(await loadCronQuarantinedJobs(storePath)).toEqual(
+          recovery ? [{ ...entry, quarantinedAtMs: 123 }] : [],
+        );
+        expect((await loadCronStore(storePath)).jobs.map((job) => job.id)).toEqual([jobId]);
+      } finally {
+        database.exec("DROP TRIGGER fail_cron_recovery_update");
+      }
 
-  it("rolls back quarantine deletion when the restored cron row cannot commit", async () => {
-    const { storePath } = makeStorePath();
-    const store = makeStore("atomic-recovery-job", true);
-    await saveCronStore(storePath, store);
-    const entry = {
-      sourceIndex: 0,
-      reason: "invalid-schedule" as const,
-      job: { id: "atomic-recovery-job" },
-    };
-    await saveCronQuarantinedJobs({ storePath, nowMs: 123, entries: [entry] });
-    const database = openOpenClawStateDatabase().db;
-    database.exec(
-      "CREATE TRIGGER fail_cron_recovery_update BEFORE UPDATE ON cron_jobs BEGIN SELECT RAISE(ABORT, 'cron recovery rejected'); END",
-    );
-    try {
-      await expect(
-        saveCronJobsStore(storePath, store, { deleteQuarantineEntries: [entry] }),
-      ).rejects.toThrow("cron recovery rejected");
-      expect(await loadCronQuarantinedJobs(storePath)).toEqual([
-        { ...entry, quarantinedAtMs: 123 },
-      ]);
-      expect((await loadCronStore(storePath)).jobs.map((job) => job.id)).toEqual([
-        "atomic-recovery-job",
-      ]);
-    } finally {
-      database.exec("DROP TRIGGER fail_cron_recovery_update");
-    }
-
-    await saveCronJobsStore(storePath, store, { deleteQuarantineEntries: [entry] });
-    expect(await loadCronQuarantinedJobs(storePath)).toEqual([]);
-  });
+      if (recovery) {
+        await saveCronJobsStore(storePath, store, { deleteQuarantineEntries: [entry] });
+        expect(await loadCronQuarantinedJobs(storePath)).toEqual([]);
+      }
+    },
+  );
 });

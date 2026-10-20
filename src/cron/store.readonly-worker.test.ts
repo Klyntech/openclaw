@@ -1,13 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync, StatementSync } from "node:sqlite";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { collectLegacyCronStoreHealthFindings } from "../commands/doctor/cron/index.js";
 import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { makeCronJob } from "./delivery.test-helpers.js";
 import {
   loadCronJobsStoreWithConfigJobsReadOnly,
   resolveCronJobsStorePath,
@@ -58,32 +60,21 @@ it.each([false, true])(
       const store: CronStoreFile = {
         version: 1,
         jobs: [
-          {
+          makeCronJob({
             id: "readonly-job",
             name: "scheduled café 🦞",
-            enabled: true,
             createdAtMs: 1,
             updatedAtMs: 2,
-            schedule: { kind: "every", everyMs: 60_000 },
             sessionTarget: "main",
-            wakeMode: "next-heartbeat",
             payload: { kind: "systemEvent", text: "persisted event" },
             state: { nextRunAtMs: 60_001 },
-          },
+          }),
         ],
       };
       await saveCronJobsStore(storePath, store);
       await closeOpenClawStateDatabaseByPathAsync(databasePath);
       const before = await fs.readFile(databasePath);
-      const spies = {
-        prepare: vi.spyOn(DatabaseSync.prototype, "prepare"),
-        exec: vi.spyOn(DatabaseSync.prototype, "exec"),
-        close: vi.spyOn(DatabaseSync.prototype, "close"),
-        get: vi.spyOn(StatementSync.prototype, "get"),
-        all: vi.spyOn(StatementSync.prototype, "all"),
-        run: vi.spyOn(StatementSync.prototype, "run"),
-        iterate: vi.spyOn(StatementSync.prototype, "iterate"),
-      };
+      const sql = observeMainThreadSql({ includeClose: true });
       try {
         const read = () => loadCronJobsStoreWithConfigJobsReadOnly(storePath, state.env);
         const loaded = await (preserveArtifacts ? withArtifactPreservingStateReads(read) : read());
@@ -92,16 +83,10 @@ it.each([false, true])(
         expect(loaded.configJobRuntimeEntries[0]?.state).toEqual({ nextRunAtMs: 60_001 });
         expect(loaded.jobsFingerprint).toBeUndefined();
         expect(loaded.invalidConfigRows).toEqual([]);
-        expect(
-          Object.fromEntries(
-            Object.entries(spies).map(([name, spy]) => [name, spy.mock.calls.length]),
-          ),
-        ).toEqual({ prepare: 0, exec: 0, close: 0, get: 0, all: 0, run: 0, iterate: 0 });
+        sql.expectIdle();
         expect(await fs.readFile(databasePath)).toEqual(before);
       } finally {
-        for (const spy of Object.values(spies)) {
-          spy.mockRestore();
-        }
+        sql.restore();
       }
     });
   },

@@ -4,6 +4,7 @@ import { runDoctorConfigPreflight } from "../commands/doctor-config-preflight.js
 import { prepareCronOwnerWriteRefusal } from "../config/io.cron-owner-refusal.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { makeCronJob } from "./delivery.test-helpers.js";
 import { writeCronJobScratch } from "./scratch-store.js";
 import {
   loadCronJobsStoreWithConfigJobs,
@@ -11,22 +12,17 @@ import {
   saveCronJobsStore,
 } from "./store.js";
 import { cronStoreKey } from "./store/key.js";
-import type { CronJob } from "./types.js";
 
-function job(id: string): CronJob {
-  return {
+function job(id: string) {
+  return makeCronJob({
     id,
     name: id,
-    enabled: true,
     agentId: "main",
     createdAtMs: 1,
     updatedAtMs: 1,
-    schedule: { kind: "every", everyMs: 60_000 },
     sessionTarget: "main",
-    wakeMode: "next-heartbeat",
     payload: { kind: "systemEvent", text: "tick" },
-    state: {},
-  };
+  });
 }
 
 function legacyReviewJob() {
@@ -39,13 +35,9 @@ function legacyReviewJob() {
   };
 }
 
-/** The weekly curator as the Gateway last converged it: a system-owned isolated agent turn. */
 function curatorJob() {
   return {
-    ...job("retired"),
-    name: "skill-collection-review-main",
-    declarationKey: "skill-collection-review:main",
-    systemOwned: true,
+    ...legacyReviewJob(),
     sessionTarget: "isolated",
     payload: { kind: "agentTurn", message: "Weekly Skill Workshop curator pass." },
     delivery: { mode: "none" },
@@ -86,12 +78,12 @@ describe("retired Workshop cron jobs", () => {
           shape === "curator" ? "skill-collection-review:main" : null,
           "retired",
         );
-        const count = (table: "cron_jobs" | "cron_job_scratch", target: string) =>
-          db
-            .prepare(
-              "SELECT COUNT(*) AS count FROM " + table + " WHERE store_key = ? AND job_id = ?",
-            )
-            .get(cronStoreKey(target), "retired");
+        const counts = (target: string) =>
+          ["cron_jobs", "cron_job_scratch"].map((table) =>
+            db
+              .prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE store_key = ? AND job_id = ?`)
+              .get(cronStoreKey(target), "retired"),
+          );
 
         const readOnly = await loadCronJobsStoreWithConfigJobsReadOnly(storePath, state.env);
         expect(readOnly.invalidConfigRows).toEqual([]);
@@ -99,14 +91,11 @@ describe("retired Workshop cron jobs", () => {
         expect(readOnly.configJobs.map((entry) => entry.id)).toEqual(["keep"]);
         const guard = await prepareCronOwnerWriteRefusal({}, { storePath, env: state.env });
         await guard.recheck();
-        expect(count("cron_jobs", storePath)).toEqual({ count: 1 });
-        expect(count("cron_job_scratch", storePath)).toEqual({ count: 1 });
+        expect(counts(storePath)).toEqual([{ count: 1 }, { count: 1 }]);
         const loaded = (await loadCronJobsStoreWithConfigJobs(storePath)).store;
         expect(loaded.jobs.map((entry) => entry.id)).toEqual(["keep"]);
-        expect(count("cron_jobs", storePath)).toEqual({ count: 0 });
-        expect(count("cron_job_scratch", storePath)).toEqual({ count: 0 });
-        expect(count("cron_jobs", otherStorePath)).toEqual({ count: 1 });
-        expect(count("cron_job_scratch", otherStorePath)).toEqual({ count: 1 });
+        expect(counts(storePath)).toEqual([{ count: 0 }, { count: 0 }]);
+        expect(counts(otherStorePath)).toEqual([{ count: 1 }, { count: 1 }]);
         expect(db.prepare("PRAGMA user_version").get()).toEqual(version);
         expect((await loadCronJobsStoreWithConfigJobs(storePath)).invalidConfigRows).toEqual([]);
       });

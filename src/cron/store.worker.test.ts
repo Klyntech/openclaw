@@ -13,7 +13,6 @@ import {
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import * as stateWorker from "../state/openclaw-state-worker-store.js";
-import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { clearCronJobActive, markCronJobActive } from "./active-jobs.js";
@@ -35,7 +34,7 @@ import { serializeCronLoadError } from "./store/load-error.js";
 import type { CronStoreWorkerOperations } from "./store/load-worker.types.js";
 import { serializeCronSaveError } from "./store/save-error.js";
 import type { CronStoreSaveWorkerOperations } from "./store/save-worker.types.js";
-import type { CronJobCreate, CronStoreFile } from "./types.js";
+import type { CronJob, CronJobCreate, CronStoreFile } from "./types.js";
 
 function cronWorkerFixture(): CronStoreFile {
   return {
@@ -53,6 +52,31 @@ function cronWorkerFixture(): CronStoreFile {
       state: { nextRunAtMs: 60_001 },
     })),
   };
+}
+
+function createService(
+  storePath: string,
+  options: Partial<Parameters<typeof createCronRegressionState>[0]> = {},
+) {
+  return new CronService(
+    createCronRegressionState({
+      storePath,
+      runIsolatedAgentJob: async () => ({ status: "skipped" }),
+      ...options,
+    }).deps,
+  );
+}
+
+function peerJobs(jobs: CronJob[]) {
+  return jobs
+    .filter((job) => job.id !== "first")
+    .map(({ id, name, agentId, runtimeAuthorityRecoveryRequired, state }) => ({
+      id,
+      name,
+      agentId,
+      runtimeAuthorityRecoveryRequired,
+      state,
+    }));
 }
 
 describe("worker load result publication", () => {
@@ -307,16 +331,10 @@ it.each([true, false])(
         ["first", "second", "guarded", "captured-\ud800", "broken", "legacy"],
         storePath,
       );
-      const service = new CronService({
-        scheduler: createTestGatewayScheduler(),
-        nowMs: () => Date.now(),
-        storePath,
+      const service = createService(storePath, {
         cronEnabled,
         defaultAgentId: "main",
         log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-        enqueueSystemEvent: vi.fn(),
-        requestHeartbeat: vi.fn(),
-        runIsolatedAgentJob: async () => ({ status: "skipped" }),
       });
       const input: CronJobCreate = {
         name: "callback save",
@@ -326,91 +344,75 @@ it.each([true, false])(
         wakeMode: "next-heartbeat",
         payload: { kind: "systemEvent", text: "ordinary saved event" },
       };
-      const steps: {
-        name: string;
-        invoke: (callback: () => undefined) => Promise<unknown>;
-        expectedNames: [string, string | undefined][];
-        singleUse?: boolean;
-      }[] = [
-        {
-          name: "guarded add",
-          expectedNames: [
-            ["guarded", "callback save"],
-            ["first", "first"],
-            ["second", "second"],
-          ],
-          invoke: (callback) =>
-            service.add({ ...input, id: " guarded " }, { commitGuard: callback }),
-        },
-        {
-          name: "captured add",
-          expectedNames: [["captured-\ud800", "callback \ufffd"]],
-          singleUse: true,
-          invoke: (callback) =>
-            service.add(
-              { ...input, id: "captured-\ud800", name: "callback \ud800" },
-              { captureRuntimeAuthority: callback },
-            ),
-        },
-        {
-          name: "guarded convergence",
-          expectedNames: [["first", "first"]],
-          invoke: (callback) =>
-            service.add(
-              { ...input, declarationKey: "agent:main:callback-save" },
-              { commitGuard: callback },
-            ),
-        },
-        {
-          name: "guarded update",
-          expectedNames: [["first", "guarded update"]],
-          invoke: (callback) =>
-            service.update("first", { name: "guarded update" }, { commitGuard: callback }),
-        },
-        {
-          name: "captured update",
-          expectedNames: [["first", "captured update"]],
-          singleUse: true,
-          invoke: (callback) =>
-            service.update(
-              "first",
-              { name: "captured update" },
-              { captureRuntimeAuthority: callback },
-            ),
-        },
-        {
-          name: "guarded owner update",
-          expectedNames: [["first", "captured update"]],
-          invoke: (callback) =>
-            service.update(
-              "first",
-              {
-                agentId: "other",
-                sessionTarget: "isolated",
-                payload: { kind: "agentTurn", message: "owner update" },
-              },
-              { commitGuard: callback },
-            ),
-        },
-        {
-          name: "captured owner update",
-          expectedNames: [["first", "captured update"]],
-          singleUse: true,
-          invoke: (callback) =>
-            service.update("first", { agentId: "main" }, { captureRuntimeAuthority: callback }),
-        },
-        {
-          name: "precondition update",
-          expectedNames: [["first", "precondition update"]],
-          singleUse: true,
-          invoke: (callback) =>
+      const mutationStep = (
+        name: string,
+        invoke: (callback: () => undefined) => Promise<unknown>,
+        expectedNames: [string, string | undefined][],
+        singleUse = false,
+      ) => ({ name, invoke, expectedNames, singleUse });
+      const options = (callback: () => undefined, captured: boolean) =>
+        captured ? { captureRuntimeAuthority: callback } : { commitGuard: callback };
+      const add =
+        (job: CronJobCreate, captured = false) =>
+        (callback: () => undefined) =>
+          service.add(job, options(callback, captured));
+      const update =
+        (patch: Parameters<CronService["update"]>[1], captured = false) =>
+        (callback: () => undefined) =>
+          service.update("first", patch, options(callback, captured));
+      const steps = [
+        mutationStep("guarded add", add({ ...input, id: " guarded " }), [
+          ["guarded", "callback save"],
+          ["first", "first"],
+          ["second", "second"],
+        ]),
+        mutationStep(
+          "captured add",
+          add({ ...input, id: "captured-\ud800", name: "callback \ud800" }, true),
+          [["captured-\ud800", "callback \ufffd"]],
+          true,
+        ),
+        mutationStep(
+          "guarded convergence",
+          add({ ...input, declarationKey: "agent:main:callback-save" }),
+          [["first", "first"]],
+        ),
+        mutationStep("guarded update", update({ name: "guarded update" }), [
+          ["first", "guarded update"],
+        ]),
+        mutationStep(
+          "captured update",
+          update({ name: "captured update" }, true),
+          [["first", "captured update"]],
+          true,
+        ),
+        mutationStep(
+          "guarded owner update",
+          update({
+            agentId: "other",
+            sessionTarget: "isolated",
+            payload: { kind: "agentTurn", message: "owner update" },
+          }),
+          [["first", "captured update"]],
+        ),
+        mutationStep(
+          "captured owner update",
+          update({ agentId: "main" }, true),
+          [["first", "captured update"]],
+          true,
+        ),
+        mutationStep(
+          "precondition update",
+          (callback) =>
             service.updateWithPrecondition("first", { name: "precondition update" }, callback),
-        },
-        {
-          name: "guarded remove",
-          expectedNames: [["second", undefined]],
-          invoke: (callback) => service.remove("second", { commitGuard: callback }),
-        },
+          [["first", "precondition update"]],
+          true,
+        ),
+        mutationStep(
+          "guarded remove",
+          (callback) => service.remove("second", { commitGuard: callback }),
+          [["second", undefined]],
+        ),
       ];
       const sql = observeMainThreadSql();
       try {
@@ -497,12 +499,7 @@ it.each([
           original.jobs[1]?.runtimeAuthority,
         );
       }
-      const state = createCronRegressionState({
-        storePath,
-        cronEnabled: true,
-        runIsolatedAgentJob: async () => ({ status: "skipped" }),
-      });
-      const service = new CronService(state.deps);
+      const service = createService(storePath);
       const entered = createDeferred();
       const release = createDeferred();
       const execute = runtimeMutation.runCronRuntimeMutation;
@@ -551,26 +548,10 @@ it.each([
         } else {
           await saveCronJobsStoreChanges(storePath, original, peer);
         }
-        const peerJobs = peer.jobs
-          .filter((job) => job.id !== "first")
-          .map(({ id, name, agentId, runtimeAuthorityRecoveryRequired, state: jobState }) => ({
-            id,
-            name,
-            agentId,
-            runtimeAuthorityRecoveryRequired,
-            state: jobState,
-          }));
         const readPeers = async () =>
-          (await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs
-            .filter((job) => job.id !== "first")
-            .map(({ id, name, agentId, runtimeAuthorityRecoveryRequired, state: jobState }) => ({
-              id,
-              name,
-              agentId,
-              runtimeAuthorityRecoveryRequired,
-              state: jobState,
-            }));
-        expect(await readPeers()).toEqual(peerJobs);
+          peerJobs((await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs);
+        const expectedPeers = peerJobs(peer.jobs);
+        expect(await readPeers()).toEqual(expectedPeers);
         if (peerMutation === "authority invalidation" || peerMutation === "runtime update") {
           const invalidated = await loadCronJobsStoreWithConfigJobs(storePath);
           expect(invalidated.jobsFingerprint).toBe(beforePeer.jobsFingerprint);
@@ -583,22 +564,17 @@ it.each([
         if (!result.committed) {
           expect(result.error).toBeInstanceOf(CronJobsStoreChangedError);
         }
-        expect(await readPeers()).toEqual(peerJobs);
+        const settledJobs = (await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs;
+        expect(peerJobs(settledJobs)).toEqual(expectedPeers);
         if (peerMutation === "target runtime update") {
-          expect((await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs[0]?.state).toEqual(
-            peer.jobs[0]?.state,
-          );
+          expect(settledJobs[0]?.state).toEqual(peer.jobs[0]?.state);
         }
         if (peerMutation === "authority invalidation") {
-          expect(
-            (await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs[1]?.runtimeAuthority,
-          ).toBeUndefined();
+          expect(settledJobs[1]?.runtimeAuthority).toBeUndefined();
         }
-        expect(
-          (await loadCronJobsStoreWithConfigJobs(storePath)).store.jobs.find(
-            (job) => job.id === "first",
-          )?.name,
-        ).toBe(result.committed ? "guarded edit" : "first");
+        expect(settledJobs.find((job) => job.id === "first")?.name).toBe(
+          result.committed ? "guarded edit" : "first",
+        );
       } finally {
         release.resolve();
         await pending;
@@ -621,15 +597,7 @@ it.each(["rename", "disable", "remove", "add"] as const)(
       await saveCronJobsStore(storePath, store);
       const resolveName = await prepareCronJobNameResolver(["first", "added"], storePath);
       const onEvent = vi.fn();
-      const state = createCronRegressionState({
-        storePath,
-        cronEnabled: true,
-        defaultAgentId: "main",
-        nowMs: () => Date.now(),
-        onEvent,
-        runIsolatedAgentJob: async () => ({ status: "skipped" }),
-      });
-      const service = new CronService(state.deps);
+      const service = createService(storePath, { onEvent, defaultAgentId: "main" });
       const marker = expectDefined(markCronJobActive("first"), "active run");
       const method =
         mutation === "remove" ? "cron.remove" : mutation === "add" ? "cron.add" : "cron.update";
@@ -722,14 +690,11 @@ it.each([false, true])(
       job.sessionTarget = "isolated";
       job.payload = { kind: "agentTurn", message: "synthetic work" };
       await saveCronJobsStore(storePath, store);
-      const state = createCronRegressionState({
-        storePath,
+      const service = createService(storePath, {
         cronEnabled: false,
+        sessionStorePath,
         defaultAgentId: "main",
-        nowMs: () => Date.now(),
-        runIsolatedAgentJob: async () => ({ status: "skipped" }),
       });
-      const service = new CronService({ ...state.deps, sessionStorePath });
       const cleanup = vi.spyOn(sessionReaper, "removeCronJobBaseSession").mockResolvedValue(true);
       const marker = active ? markCronJobActive(job.id) : undefined;
       const dropped = loseFirstCronMutationReply("cron.mutateJobs");
