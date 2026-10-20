@@ -39,13 +39,9 @@ function publishOrigin(origin = "https://node.tailnet.ts.net", mode: "serve" | "
   return prepareTailscalePublishedOrigin({ origin, mode });
 }
 
-function materialize() {
-  return materializeMcpAppChannelPresentation({ sessionKey, view: channelView, nowMs });
-}
-
-function resetTailscalePublishedOrigin() {
-  publishOrigin("https://reset.test")();
-}
+const materialize = () =>
+  materializeMcpAppChannelPresentation({ sessionKey, view: channelView, nowMs });
+const resetTailscalePublishedOrigin = () => publishOrigin("https://reset.test")();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -95,22 +91,14 @@ describe("materializeMcpAppChannelPresentation", () => {
       toolOperationsAuthorized: true,
       nowMs,
     });
-    expect(presentation).toEqual({
-      blocks: [
-        {
-          type: "buttons",
-          buttons: [
-            {
-              label: "Open app",
-              action: {
-                type: "web-app",
-                url: "https://node.tailnet.ts.net/__openclaw__/mcp-app#opaque-ticket",
-              },
-            },
-          ],
-        },
-      ],
-    });
+    const button = {
+      label: "Open app",
+      action: {
+        type: "web-app",
+        url: "https://node.tailnet.ts.net/__openclaw__/mcp-app#opaque-ticket",
+      },
+    };
+    expect(presentation).toEqual({ blocks: [{ type: "buttons", buttons: [button] }] });
   });
 
   it.each([

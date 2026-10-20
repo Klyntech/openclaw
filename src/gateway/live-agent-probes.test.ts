@@ -31,26 +31,16 @@ describe("live-agent-probes", () => {
     );
   });
 
-  it("uses the source runner when packaged CLI output is absent", () => {
-    expect(resolveOpenClawCliProcessArgs(["cron", "list"], false)).toEqual([
-      "scripts/run-node.mjs",
-      "cron",
-      "list",
-    ]);
-    expect(resolveOpenClawCliProcessArgs(["cron", "list"], true)).toEqual([
-      "openclaw.mjs",
-      "cron",
-      "list",
-    ]);
+  it.each([
+    [false, "scripts/run-node.mjs"],
+    [true, "openclaw.mjs"],
+  ] as const)("selects CLI entry for built=%s", (built, entry) => {
+    expect(resolveOpenClawCliProcessArgs(["cron", "list"], built)).toEqual([entry, "cron", "list"]);
   });
 
   it("accepts only cat for the shared image probe reply", () => {
     expect(assertLiveImageProbeReply("cat")).toBeUndefined();
-    expect(
-      assertLiveImageProbeReply(
-        "model metadata for `gpt-5.5` not found. defaulting to fallback metadata; this can degrade performance and cause issues.cat",
-      ),
-    ).toBeUndefined();
+    expect(assertLiveImageProbeReply("metadata unavailable.cat")).toBeUndefined();
     expect(() => assertLiveImageProbeReply("horse")).toThrow("image check expected 'cat'");
     expect(() => assertLiveImageProbeReply("caterpillar")).toThrow("image check expected 'cat'");
   });
