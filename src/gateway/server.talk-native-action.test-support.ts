@@ -42,7 +42,7 @@ export async function runTalkNativeActionParity(fixture: {
     config: { ...config, tools: { ...config.tools, exec: { host: "gateway", mode: "full" } } },
   });
   await replaceSessionEntry(
-    { agentId, sessionKey: canonicalKey, sessionId: parentSessionId, storePath },
+    { agentId, sessionKey: canonicalKey, storePath },
     {
       sessionId: parentSessionId,
       updatedAt: Date.now(),

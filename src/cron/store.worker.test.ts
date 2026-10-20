@@ -30,7 +30,7 @@ import { serializeCronLoadError } from "./store/load-error.js";
 import type { CronStoreWorkerOperations } from "./store/load-worker.types.js";
 import { serializeCronSaveError } from "./store/save-error.js";
 import type { CronStoreSaveWorkerOperations } from "./store/save-worker.types.js";
-import type { CronJob, CronJobCreate, CronStoreFile } from "./types.js";
+import type { CronJobCreate, CronStoreFile } from "./types.js";
 
 function cronWorkerFixture(): CronStoreFile {
   return {
@@ -63,7 +63,7 @@ function createService(
   );
 }
 
-function peerJobs(jobs: CronJob[]) {
+function peerJobs(jobs: CronStoreFile["jobs"]) {
   return jobs
     .filter((job) => job.id !== "first")
     .map(({ id, name, agentId, runtimeAuthorityRecoveryRequired, state }) => ({

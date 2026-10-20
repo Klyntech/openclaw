@@ -96,8 +96,8 @@ function buttonWithText(root: ParentNode, label: string) {
   );
 }
 
-function element<E extends Element = HTMLElement>(root: ParentNode, selector: string): E {
-  return expectDefined(root.querySelector<E>(selector), selector);
+function element(root: ParentNode, selector: string): HTMLElement {
+  return expectDefined(root.querySelector<HTMLElement>(selector), selector);
 }
 
 function videoAttachment(
@@ -138,7 +138,7 @@ it("renders and updates the workspace rail inside the Files panel", async () => 
   await renderPanels();
   expect(query(".chat-workspace-rail")).toBe(rail);
   expect(rail.querySelector<HTMLInputElement>('input[type="search"]')?.value).toBe("notes");
-  element<HTMLButtonElement>(rail, 'button[aria-label="notes.txt"]').click();
+  element(rail, 'button[aria-label="notes.txt"]').click();
   expect(sessions.getFile).toHaveBeenCalledExactlyOnceWith(state.sessionKey, "notes.txt", {
     agentId: "main",
   });
@@ -151,11 +151,13 @@ it("navigates an existing file tab to an explicit line without resetting its edi
   })) {
     const descriptor = Object.getOwnPropertyDescriptor(Range.prototype, key);
     Object.defineProperty(Range.prototype, key, { configurable: true, value });
-    onTestFinished(() =>
-      descriptor
-        ? Object.defineProperty(Range.prototype, key, descriptor)
-        : Reflect.deleteProperty(Range.prototype, key),
-    );
+    onTestFinished(() => {
+      if (descriptor) {
+        Object.defineProperty(Range.prototype, key, descriptor);
+      } else {
+        Reflect.deleteProperty(Range.prototype, key);
+      }
+    });
   }
   const { file, mount, renderPanels, state, sessions, query } = createReviewFixture();
   const navigate = async (line?: number) => {
@@ -193,7 +195,7 @@ it("navigates an existing file tab to an explicit line without resetting its edi
   const editorElement = await vi.waitFor(() => element(mount, ".cm-editor"));
   const editor = expectDefined(EditorView.findFromDOM(editorElement), "CodeMirror view");
   await expectLine(2);
-  element<HTMLButtonElement>(mount, '[aria-label="Edit file"]').click();
+  element(mount, '[aria-label="Edit file"]').click();
   await renderPanels();
   editor.dispatch({ changes: { from: 0, to: 0, insert: "draft " } });
   const draft = editor.state.doc.toString();
@@ -301,7 +303,7 @@ it.each(["ready", "unavailable", "error"] as const)(
     );
     onTestFinished(() => releaseChatMediaResourceOwner(rerender));
     const open = await vi.waitFor(() =>
-      element<HTMLButtonElement>(container, ".chat-assistant-attachment-card__expand"),
+      element(container, ".chat-assistant-attachment-card__expand"),
     );
     open.click();
     const opened = expectDefined<SidebarContent>(sidebarContent, "Opened attachment");
@@ -326,7 +328,7 @@ it.each(["ready", "unavailable", "error"] as const)(
     expect(panel.textContent).toContain("recording.mp4");
     expect(panel.textContent).not.toContain("Preview unavailable");
     expect(panel.querySelector('[aria-busy="true"]')).not.toBeNull();
-    const video = await vi.waitFor(() => element<HTMLVideoElement>(panel, "video"));
+    const video = await vi.waitFor(() => expectDefined(panel.querySelector("video"), "video"));
     expect(video.hasAttribute("src")).toBe(false);
     expect(video.preload).toBe("auto");
     const presentation = panel.querySelector('[role="status"]');
@@ -428,7 +430,7 @@ it.each(["history", "stream"] as const)(
     try {
       renderAttachment();
       const open = await vi.waitFor(() =>
-        element<HTMLButtonElement>(transcript, ".chat-assistant-attachment-card__expand"),
+        element(transcript, ".chat-assistant-attachment-card__expand"),
       );
       expect(fetchMetadata).toHaveBeenCalledOnce();
       open.click();

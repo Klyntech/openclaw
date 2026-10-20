@@ -12,7 +12,9 @@ import * as paneTest from "./chat-pane.test-support.ts";
 
 it("automatically restores live observation after a subscription timeout without a composer error", async () => {
   vi.useFakeTimers();
-  onTestFinished(() => vi.useRealTimers());
+  onTestFinished(() => {
+    vi.useRealTimers();
+  });
   const sessionKey = "agent:main:subscription-recovery";
   const messages = [nativeHistoryMessage(2, "The node completed the work.")];
   let observing = false;

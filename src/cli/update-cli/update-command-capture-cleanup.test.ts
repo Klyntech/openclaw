@@ -124,7 +124,9 @@ const expectedPreview = (captures: Record<string, string>) =>
         ["unattributed", "protected", "unmanifested-update-capture", 1038],
         ["unmarked", "protected", "unmanifested-update-capture", 1003],
       ] as const
-    ).map(([label, outcome, reason, bytes]) => [captures[label], { outcome, reason, bytes }]),
+    ).map(
+      ([label, outcome, reason, bytes]) => [captures[label], { outcome, reason, bytes }] as const,
+    ),
   );
 
 it.each([

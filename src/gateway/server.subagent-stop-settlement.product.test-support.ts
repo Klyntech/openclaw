@@ -33,7 +33,7 @@ export const completedEmbeddedRun: EmbeddedAgentRunResult = {
 };
 
 const proxyUser = "subagent-stop-administrator@example.test";
-const operatorScopes = ["operator.admin", "operator.read", "operator.write"];
+const operatorScopes = ["operator.admin", "operator.read", "operator.write"] as const;
 export const subagentStopProxyHeaders = {
   "x-forwarded-for": "203.0.113.81",
   "x-forwarded-proto": "https",

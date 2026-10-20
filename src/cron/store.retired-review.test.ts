@@ -18,10 +18,18 @@ function job(id: string) {
   });
 }
 
-const legacyReview = { payload: { kind: "skillCollectionReview" } };
+const legacyReview = {
+  ...job("retired"),
+  name: "skill-collection-review-main",
+  declarationKey: "skill-collection-review:main",
+  systemOwned: true,
+  payload: { kind: "skillCollectionReview" },
+};
 const curator = {
   ...job("retired"),
+  name: "skill-collection-review-main",
   declarationKey: "skill-collection-review:main",
+  systemOwned: true,
   sessionTarget: "isolated",
   payload: { kind: "agentTurn", message: "Weekly Skill Workshop curator pass." },
   delivery: { mode: "none" },

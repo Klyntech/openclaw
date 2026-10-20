@@ -102,11 +102,12 @@ const acceptCall = (mode: TaskSuggestionStartMode, cwd?: string) => [
 function createTray(pane: ReturnType<typeof createChatPane>["pane"]) {
   const container = document.createElement("div");
   let setView: Setter<ChatTaskSuggestionTrayProps> | undefined;
+  const query: typeof container.querySelector = container.querySelector.bind(container);
   return {
     container,
     acceptance: () =>
       pane.suggestionChatProps(true, false, false).taskSuggestionAcceptance?.(suggestion.id),
-    query: <T extends Element = Element>(selector: string) => container.querySelector<T>(selector),
+    query,
     draw: (connected = true) => {
       const props = pane.suggestionChatProps(connected, false, false);
       if (!setView) {

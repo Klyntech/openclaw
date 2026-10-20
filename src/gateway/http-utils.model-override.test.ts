@@ -1,7 +1,7 @@
-import type { IncomingMessage } from "node:http";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ModelProviderConfig } from "../config/types.models.js";
+import { createGatewayRequest } from "./hooks-test-helpers.js";
 
 const loadConfigMock = vi.fn();
 const loadGatewayModelCatalogMock = vi.fn();
@@ -29,7 +29,7 @@ const configure = (defaults: Defaults, provider?: ModelProviderConfig) =>
 
 const override = (model: string) =>
   resolveOpenAiCompatModelOverride({
-    req: { headers: { "x-openclaw-model": model } } as IncomingMessage,
+    req: createGatewayRequest({ path: "/", headers: { "x-openclaw-model": model } }),
     agentId: "main",
     model: "openclaw",
   });

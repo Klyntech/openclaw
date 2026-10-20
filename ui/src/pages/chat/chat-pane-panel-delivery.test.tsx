@@ -55,7 +55,8 @@ it("replays an initial panel intent through its Solid pane and retires delivery 
     }
     return originalRequest(method, ...args);
   });
-  client.request = createTestGatewayClient(request).request;
+  const testClient = createTestGatewayClient(request);
+  client.request = testClient.request.bind(testClient);
   onTestFinished(() => {
     client.request = originalRequest;
   });

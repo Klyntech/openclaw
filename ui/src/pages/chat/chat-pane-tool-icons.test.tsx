@@ -47,10 +47,44 @@ it("renders plugin artwork for accepted history absent from the capped session l
   const originalRequest = client.request.bind(client);
   const request = vi.spyOn(client, "request").mockImplementation(async (method, ...args) => {
     if (method === "tools.effective") {
-      return { groups: [{ tools: [{ id: "example_tool", pluginId: "example" }] }] };
+      return {
+        agentId: "main",
+        profile: "full",
+        groups: [
+          {
+            id: "plugin",
+            label: "Tools",
+            source: "plugin",
+            tools: [
+              {
+                id: "example_tool",
+                label: "Example",
+                description: "",
+                rawDescription: "",
+                pluginId: "example",
+                source: "plugin",
+              },
+            ],
+          },
+        ],
+      };
     }
     if (method === "plugins.list") {
-      return { plugins: [{ id: "example", hasActivityIcon: true }] };
+      return {
+        plugins: [
+          {
+            id: "example",
+            name: "Example",
+            installed: true,
+            enabled: true,
+            state: "enabled",
+            hasIcon: true,
+            hasActivityIcon: true,
+          },
+        ],
+        diagnostics: [],
+        mutationAllowed: false,
+      };
     }
     return originalRequest(method, ...args);
   });

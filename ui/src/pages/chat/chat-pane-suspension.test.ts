@@ -24,7 +24,11 @@ function setVisibility(next: DocumentVisibilityState) {
 }
 function createPane() {
   const fixture = createTestChatPane({ client: createTestGatewayClient(async () => ({})) });
-  fixture.pane.render = () => ({ layout: null });
+  fixture.pane.render = () => ({
+    layout: null,
+    capabilityDialogs: undefined,
+    providerReviewSource: undefined,
+  });
   panes.push(fixture.pane);
   return fixture;
 }

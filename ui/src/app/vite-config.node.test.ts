@@ -73,7 +73,7 @@ function hook<T extends (...args: never[]) => unknown>(value: T | { handler: T }
   return typeof value === "function" ? value : value?.handler;
 }
 
-function localeHooks(aliases: Alias[] = []) {
+async function localeHooks(aliases: Alias[] = []) {
   const plugin = controlUiLocaleModulesPlugin();
   const configResolved = hook(plugin.configResolved);
   const alias = [
@@ -81,7 +81,7 @@ function localeHooks(aliases: Alias[] = []) {
     ...resolveSourcePackageAliasesForVite(),
     ...resolveTsconfigPathAliasesForVite(),
   ];
-  configResolved?.call({} as never, { resolve: { alias } } as never);
+  await configResolved?.call({} as never, { resolve: { alias } } as never);
   const resolveId = hook(plugin.resolveId);
   const load = hook(plugin.load);
   const watchChange = hook(plugin.watchChange);
@@ -93,7 +93,7 @@ function localeHooks(aliases: Alias[] = []) {
 }
 
 async function loadLocaleSource(
-  load: ReturnType<typeof localeHooks>["load"],
+  load: Awaited<ReturnType<typeof localeHooks>>["load"],
   id: string = baseLocaleId,
   addWatchFile: (path: string) => void = vi.fn(),
 ) {
@@ -141,14 +141,17 @@ const withoutMemory = (run: () => Promise<void>) =>
 const withSourceImport = (
   source: Parameters<typeof viteMocks.runnerImport.withImplementation>[0],
   run: () => Promise<void>,
-) => withoutMemory(() => viteMocks.runnerImport.withImplementation(source, run));
+) =>
+  withoutMemory(async () => {
+    await viteMocks.runnerImport.withImplementation(source, run);
+  });
 
 function dataModuleUrl(source: string): string {
   return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 }
 
 async function executeLocale(
-  load: ReturnType<typeof localeHooks>["load"],
+  load: Awaited<ReturnType<typeof localeHooks>>["load"],
   baseSource: string,
   deferNamespaces = false,
 ) {
@@ -512,7 +515,7 @@ it("includes every English dependency in the raw source-hash input", async () =>
 });
 
 it("defers page and config-hint translations until their namespace loads", async () => {
-  const { load, resolveId } = localeHooks();
+  const { load, resolveId } = await localeHooks();
   const resolve = (id: string) => resolveId.call({} as never, id, undefined, {} as never);
   const baseId = "virtual:openclaw-control-ui-locale/fr";
   const configHintsId = "virtual:openclaw-control-ui-locale-config-hints/fr";
@@ -559,7 +562,7 @@ it("defers page and config-hint translations until their namespace loads", async
 });
 
 it("bootstraps only an absent locale memory from the English catalog", async () => {
-  const { load } = localeHooks();
+  const { load } = await localeHooks();
   const baseId = baseLocaleId;
   const addWatchFile = vi.fn();
   await withoutMemory(async () => {
@@ -581,7 +584,7 @@ it.each([
   },
   { name: "malformed", memory: "{", expected: SyntaxError },
 ])("rejects $name locale memory", async ({ memory, expected }) => {
-  const { load } = localeHooks();
+  const { load } = await localeHooks();
   await fsMocks.readFileSync.withImplementation(
     () => memory,
     async () => {
@@ -605,7 +608,7 @@ it.each([
     imports++ === 0 ? staleImport.promise : catalogImport(currentCatalog),
   );
   await withSourceImport(sourceImport, async () => {
-    const { load, watchChange } = localeHooks();
+    const { load, watchChange } = await localeHooks();
     let baseSourcePromise = loadLocaleSource(load);
     await vi.waitFor(() => expect(sourceImport).toHaveBeenCalledOnce());
     if (invalidate) {
@@ -657,7 +660,7 @@ it("reloads configured source aliases instead of installed package outputs", asy
     await withSourceImport(
       (_entry, config) => runnerImport(entry, config),
       async () => {
-        const { load, watchChange } = localeHooks([
+        const { load, watchChange } = await localeHooks([
           { find: "@fixture/labels", replacement: dependency },
         ]);
         const addWatchFile = vi.fn();
@@ -684,7 +687,7 @@ it("reloads configured source aliases instead of installed package outputs", asy
 });
 
 it("invalidates a resolved locale generation at build start", async () => {
-  const catalogs = [
+  const catalogs: Array<TranslationMap & { common: TranslationMap }> = [
     { common: { health: "first" }, configHints: { first: { label: "first" } } },
     { common: { health: "second" }, configHints: { second: { label: "second" } } },
   ];
@@ -692,7 +695,7 @@ it("invalidates a resolved locale generation at build start", async () => {
   await withSourceImport(
     async () => catalogImport(catalogs[imports++]!, { common: { health: "health" } }),
     async () => {
-      const { buildStart, load } = localeHooks();
+      const { buildStart, load } = await localeHooks();
       const firstBase = await loadLocaleSource(load);
       const first = await executeLocale(load, firstBase);
       expect(first.catalog).toEqual(catalogs[0]);
@@ -705,7 +708,7 @@ it("invalidates a resolved locale generation at build start", async () => {
 });
 
 it("omits stale config and Settings translations so runtime English can resolve them", async () => {
-  const { load } = localeHooks();
+  const { load } = await localeHooks();
   const currentHintText = "Gateway Token";
   const currentHintKey = configHintTranslationKey("gateway.auth.token", "label", currentHintText);
   const staleHintText = "Old Gateway Token";

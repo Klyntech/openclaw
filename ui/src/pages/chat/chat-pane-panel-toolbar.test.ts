@@ -17,8 +17,7 @@ import {
 import { openSlot, promoteSidebarPanel, setSidebarOpen } from "./sidebar-layout.ts";
 
 function layoutControls(container: HTMLElement) {
-  const query = <T extends HTMLElement = HTMLElement>(selector: string) =>
-    container.querySelector<T>(selector)!;
+  const query = (selector: string) => container.querySelector<HTMLElement>(selector)!;
   const open = async () => {
     await openNativeMenu(query(".chat-pane__layout-menu"));
     return query(".oc-menu");
@@ -118,10 +117,10 @@ it("retains focused Layout controls and an open menu when header props refresh",
     ".chat-pane__split-right",
     ".chat-pane__layout-menu",
   ];
+  const panel = await open();
   const controls = selectors.map((selector) => query(selector));
   const trigger = controls[0]!;
   const split = controls[2]!;
-  const panel = await open();
   trigger.focus();
   mounted.update({
     title: "Updated session title",

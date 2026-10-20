@@ -157,7 +157,7 @@ function observeRender<T>(pane: TestChatPane, read: () => T) {
   return {
     rendered,
     render,
-    async expectUpdate(change: () => void, expected: T, parked = false) {
+    expectUpdate: async (change: () => void, expected: T, parked = false) => {
       if (parked) {
         pane.presented = false;
         await settle();
