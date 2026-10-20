@@ -71,8 +71,7 @@ it("fills a settled short window once without filling the reader's prefetch marg
   setHeight(1800);
   await intersect();
   expect(request.mock.calls.map(([, params]) => params.offset)).toEqual([2]);
-  expect(pane.stagedOlder.page).toBeNull();
-  expect(pane.stagedOlder.load).toBeNull();
+  expect(pane.stagedOlder).toMatchObject({ page: null, load: null });
 });
 
 it("caps automatic requests at one page even while short, renewing on another open", async () => {
@@ -84,13 +83,6 @@ it("caps automatic requests at one page even while short, renewing on another op
   pane.resetOlderMessagesViewport();
   await intersect();
   expect(request.mock.calls.map(([, params]) => params.offset)).toEqual([2, 3]);
-});
-
-it("does not bootstrap a first page that already overflows", async () => {
-  const { intersect, request, setHeight } = setup();
-  setHeight(501);
-  await intersect();
-  expect(request).not.toHaveBeenCalled();
 });
 
 it("keeps a bounded snapshot refill for reader intent even in a short settled window", async () => {

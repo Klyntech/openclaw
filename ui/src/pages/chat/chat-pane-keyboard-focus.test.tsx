@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { registerModalSurface } from "../../components/overlay-registry.ts";
 import { getRenderedModalDialog, installDialogPolyfill } from "../../test-helpers/modal-dialog.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
@@ -30,6 +30,18 @@ function createFocusedPane() {
   return { pane, focus: vi.spyOn(textarea, "focus") };
 }
 
+function typingTarget(pane: ReturnType<typeof createFocusedPane>["pane"], target: HTMLElement) {
+  target.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
+  target.focus();
+  target.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true, composed: true }));
+}
+
+function bodyElement<K extends keyof HTMLElementTagNameMap>(tag: K) {
+  const element = document.body.appendChild(document.createElement(tag));
+  onTestFinished(() => element.remove());
+  return element;
+}
+
 describe("chat pane keyboard focus", () => {
   it.each([
     ["range", "Home", () => <input type="range" />, false],
@@ -42,21 +54,17 @@ describe("chat pane keyboard focus", () => {
     ],
     ["transcript", "Home", () => <span>History</span>, true],
     ...nativeControlNavigationCases
+      // Windows covers non-Apple paging, video covers native media, and Home covers Mac edges.
       .filter((testCase) => {
         const [name, key] = testCase;
         const fixture = testCase[4];
-        if (key !== "ArrowUp" && key !== "Home" && key !== "PageUp") {
-          return false;
-        }
-        // Windows represents non-Apple paging; native media shares one key owner.
-        if (name.startsWith("Linux ") || name.startsWith("audio ")) {
-          return false;
-        }
-        if (name.startsWith("video ") && (fixture.shiftKey || fixture.ctrlKey)) {
-          return false;
-        }
-        // Home already covers both edges of each Mac nested scrollport.
-        return !(name.startsWith("Mac ") && key === "PageUp");
+        return (
+          ["ArrowUp", "Home", "PageUp"].includes(key) &&
+          !name.startsWith("Linux ") &&
+          !name.startsWith("audio ") &&
+          !(name.startsWith("video ") && (fixture.shiftKey || fixture.ctrlKey)) &&
+          !(name.startsWith("Mac ") && key === "PageUp")
+        );
       })
       .map(
         ([name, key, content, controlOwned, fixture]) =>
@@ -108,89 +116,51 @@ describe("chat pane keyboard focus", () => {
 
   it("keeps the letter-to-composer contract when a button is focused", () => {
     const { pane, focus } = createFocusedPane();
-    const button = document.body.appendChild(document.createElement("button"));
-    button.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
-    button.focus();
-
-    try {
-      button.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "x", bubbles: true, composed: true }),
-      );
-
-      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-    } finally {
-      button.remove();
-    }
+    typingTarget(pane, bodyElement("button"));
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
   });
 
   it("distinguishes an open disclosure from an open overlay", () => {
     const { pane, focus } = createFocusedPane();
-    const details = document.body.appendChild(document.createElement("details"));
+    const details = bodyElement("details");
     details.open = true;
     const summary = details.appendChild(document.createElement("summary"));
-    summary.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
-    let dialog: HTMLDialogElement | null = null;
-
-    try {
-      summary.focus();
-      summary.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "x", bubbles: true, composed: true }),
-      );
-      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-
-      focus.mockClear();
-      dialog = document.body.appendChild(document.createElement("dialog"));
-      dialog.open = true;
-      const dialogButton = dialog.appendChild(document.createElement("button"));
-      dialogButton.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
-      dialogButton.focus();
-      dialogButton.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "x", bubbles: true, composed: true }),
-      );
-      expect(focus).not.toHaveBeenCalled();
-    } finally {
-      details.remove();
-      dialog?.remove();
-    }
+    typingTarget(pane, summary);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    focus.mockClear();
+    const dialog = bodyElement("dialog");
+    dialog.open = true;
+    typingTarget(pane, dialog.appendChild(document.createElement("button")));
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("does not steal typing focus from a shadow-root confirmation", async () => {
     const restoreDialogPolyfill = installDialogPolyfill();
     const { pane, focus } = createFocusedPane();
     const container = document.body.appendChild(document.createElement("div"));
+    onTestFinished(() => {
+      container.remove();
+      restoreDialogPolyfill();
+    });
     const shadow = container.attachShadow({ mode: "open" });
     const modal = shadow.appendChild(document.createElement("openclaw-modal-dialog"));
     const cancel = modal.appendChild(document.createElement("button"));
 
-    try {
-      const { dialog } = await getRenderedModalDialog(shadow);
-      expect(dialog.open).toBe(true);
-      expect(dialog.getRootNode()).toBe(shadow);
-      expect(document.querySelector("dialog[open]")).toBeNull();
-      cancel.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
-
-      cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "x", cancelable: true }));
-
-      expect(focus).not.toHaveBeenCalled();
-    } finally {
-      container.remove();
-      restoreDialogPolyfill();
-    }
+    const { dialog } = await getRenderedModalDialog(shadow);
+    expect(dialog.open).toBe(true);
+    expect(dialog.getRootNode()).toBe(shadow);
+    expect(document.querySelector("dialog[open]")).toBeNull();
+    cancel.addEventListener("keydown", (event) => pane.handleDocumentKeydown(event));
+    cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "x", cancelable: true }));
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("does not steal typing focus from a light-DOM confirmation", () => {
     const { pane, focus } = createFocusedPane();
-    const modal = document.body.appendChild(document.createElement("div"));
+    const modal = bodyElement("div");
     modal.setAttribute("aria-modal", "true");
-    const releaseModal = registerModalSurface(modal);
-
-    try {
-      pane.handleDocumentKeydown(new KeyboardEvent("keydown", { key: "x", cancelable: true }));
-
-      expect(focus).not.toHaveBeenCalled();
-    } finally {
-      releaseModal();
-      modal.remove();
-    }
+    onTestFinished(registerModalSurface(modal));
+    pane.handleDocumentKeydown(new KeyboardEvent("keydown", { key: "x", cancelable: true }));
+    expect(focus).not.toHaveBeenCalled();
   });
 });

@@ -73,7 +73,42 @@ function createReviewFixture() {
   const provider = createChatSidebarContainer();
   fixture.mount.before(provider);
   provider.append(fixture.mount);
-  return fixture;
+  return {
+    ...fixture,
+    previewAlt: () =>
+      fixture.mount.querySelector<HTMLImageElement>(
+        ".chat-files-panel__page:not([hidden]) .chat-tool-card__preview-image",
+      )?.alt,
+    settlePreview: async () => {
+      fixture.file.resolve(fixture.preview);
+      await fixture.file.promise;
+      await fixture.renderPanels();
+    },
+  };
+}
+
+function buttonWithText(root: ParentNode, label: string) {
+  return expectDefined(
+    [...root.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === label,
+    ),
+    `${label} action`,
+  );
+}
+
+function element<E extends Element = HTMLElement>(root: ParentNode, selector: string): E {
+  return expectDefined(root.querySelector<E>(selector), selector);
+}
+
+function diffRequest() {
+  return vi.fn().mockResolvedValue({
+    sessionKey: "agent:main:review",
+    branch: "feature/review",
+    baseRef: "main",
+    additions: 1,
+    deletions: 1,
+    files: [{ path: "example.txt", status: "modified", additions: 1, deletions: 1 }],
+  });
 }
 
 function discussionSlots(discussionAvailable: boolean) {
@@ -104,20 +139,13 @@ describe("chat pane embedded panels", () => {
     });
     await vi.waitFor(() => expect(createSessionWorkspaceProps(state).loading).toBe(false));
     await renderPanels();
-    const rail = expectDefined(
-      mount.querySelector("openclaw-chat-files-panel .chat-workspace-rail"),
-      "Workspace rail inside Files",
-    );
+    const rail = element(mount, "openclaw-chat-files-panel .chat-workspace-rail");
     expect(rail.querySelector('button[aria-label="notes.txt"]')).not.toBeNull();
     getSessionWorkspace(state).browserSearch = "notes";
     await renderPanels();
     expect(mount.querySelector(".chat-workspace-rail")).toBe(rail);
     expect(rail.querySelector<HTMLInputElement>('input[type="search"]')?.value).toBe("notes");
-    const file = expectDefined(
-      rail.querySelector<HTMLButtonElement>('button[aria-label="notes.txt"]'),
-      "Workspace file after refresh",
-    );
-    file.click();
+    element<HTMLButtonElement>(rail, 'button[aria-label="notes.txt"]').click();
     expect(sessions.getFile).toHaveBeenCalledExactlyOnceWith(state.sessionKey, "notes.txt", {
       agentId: "main",
     });
@@ -145,6 +173,19 @@ describe("chat pane embedded panels", () => {
       }
     });
     const { file, mount, renderPanels, state, sessions } = createReviewFixture();
+    const navigate = async (line?: number) => {
+      openSessionWorkspaceFile(state, {
+        path: "navigation.txt",
+        ...(line === undefined ? {} : { line }),
+      });
+      await renderPanels();
+    };
+    const expectLine = (line: number) =>
+      vi.waitFor(() =>
+        expect(mount.querySelector(".file-view__line--target")?.getAttribute("data-line")).toBe(
+          String(line),
+        ),
+      );
     state.hello = gatewayHelloForMethods(["sessions.files.get", "sessions.files.set"]);
     const text = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n");
     openSessionWorkspaceFile(state, { path: "navigation.txt", line: 2 });
@@ -166,34 +207,22 @@ describe("chat pane embedded panels", () => {
     await renderPanels();
     // The panel commit does not include the editor's detached module load.
     await vi.dynamicImportSettled();
-    const editorElement = await vi.waitFor(() =>
-      expectDefined(mount.querySelector<HTMLElement>(".cm-editor"), "file editor"),
-    );
+    const editorElement = await vi.waitFor(() => element(mount, ".cm-editor"));
     const editor = expectDefined(EditorView.findFromDOM(editorElement), "CodeMirror view");
-    await vi.waitFor(() =>
-      expect(mount.querySelector(".file-view__line--target")?.getAttribute("data-line")).toBe("2"),
-    );
-    const editButton = expectDefined(
-      mount.querySelector<HTMLButtonElement>('[aria-label="Edit file"]'),
-      "Edit action",
-    );
-    editButton.click();
+    await expectLine(2);
+    element<HTMLButtonElement>(mount, '[aria-label="Edit file"]').click();
     await renderPanels();
     editor.dispatch({ changes: { from: 0, to: 0, insert: "draft " } });
     const draft = editor.state.doc.toString();
     const scroll = vi.spyOn(EditorView, "scrollIntoView");
     onTestFinished(() => scroll.mockRestore());
-    openSessionWorkspaceFile(state, { path: "navigation.txt", line: 7 });
-    await renderPanels();
-    await vi.waitFor(() =>
-      expect(mount.querySelector(".file-view__line--target")?.getAttribute("data-line")).toBe("7"),
-    );
+    await navigate(7);
+    await expectLine(7);
     expect(mount.querySelector(".cm-editor")).toBe(editorElement);
     expect(editor.state.doc.toString()).toBe(draft);
     expect(scroll).toHaveBeenCalled();
     scroll.mockClear();
-    openSessionWorkspaceFile(state, { path: "navigation.txt", line: 7 });
-    await renderPanels();
+    await navigate(7);
     expect(scroll).toHaveBeenCalled();
     expect(editor.contentDOM.getAttribute("contenteditable")).toBe("true");
     expect(undo(editor)).toBe(true);
@@ -202,28 +231,21 @@ describe("chat pane embedded panels", () => {
     expect(state.sessionWorkspaceState?.previews).toHaveLength(1);
     scroll.mockClear();
     editor.scrollDOM.scrollTop = 123;
-    openSessionWorkspaceFile(state, { path: "navigation.txt" });
-    await renderPanels();
+    await navigate();
     expect(mount.querySelector(".cm-editor")).toBe(editorElement);
     expect(editor.scrollDOM.scrollTop).toBe(123);
     expect(scroll).not.toHaveBeenCalled();
     sessions.setFile = vi.fn().mockResolvedValue({ file: { hash: "saved" } });
     editor.dispatch({ changes: { from: 0, to: 0, insert: "saved " } });
     await renderPanels();
-    const save = expectDefined(
-      [...mount.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Save",
-      ),
-      "Save action",
-    );
+    const save = buttonWithText(mount, "Save");
     save.click();
     await vi.waitFor(() => expect(save.disabled).toBe(true));
     let savedText = editor.state.doc.toString();
     const saved = (await file.promise)!;
     const pendingRead = createDeferred<SessionWorkspaceGetResult | null>();
     vi.mocked(sessions.getFile).mockReturnValueOnce(pendingRead.promise);
-    openSessionWorkspaceFile(state, { path: "navigation.txt" });
-    await renderPanels();
+    await navigate();
     editor.dispatch({ changes: { from: 0, to: 0, insert: "newer " } });
     await renderPanels();
     sessions.setFile = vi.fn().mockResolvedValue({ file: { hash: "newer-saved" } });
@@ -239,37 +261,19 @@ describe("chat pane embedded panels", () => {
       ...saved,
       file: { ...saved.file, content: savedText, hash: "newer-saved" },
     });
-    const discard = expectDefined(
-      [...mount.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Discard",
-      ),
-      "Discard action",
-    );
-    discard.click();
+    buttonWithText(mount, "Discard").click();
     await renderPanels();
-    const raw = expectDefined(
-      [...mount.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "View Raw Text",
-      ),
-      "Raw action",
-    );
-    raw.click();
+    buttonWithText(mount, "View Raw Text").click();
     await renderPanels();
     const rawReader = mount.querySelector(".sidebar-markdown-reader");
     expect(rawReader).not.toBeNull();
-    openSessionWorkspaceFile(state, { path: "navigation.txt" });
-    await renderPanels();
+    await navigate();
     expect(mount.querySelector(".sidebar-markdown-reader")).toBe(rawReader);
     expect(mount.querySelector(".cm-editor")).toBeNull();
-    openSessionWorkspaceFile(state, { path: "navigation.txt", line: 3 });
-    await renderPanels();
-    await vi.waitFor(() =>
-      expect(mount.querySelector(".file-view__line--target")?.getAttribute("data-line")).toBe("3"),
-    );
+    await navigate(3);
+    await expectLine(3);
     const restored = expectDefined(
-      EditorView.findFromDOM(
-        expectDefined(mount.querySelector<HTMLElement>(".cm-editor"), "restored editor"),
-      ),
+      EditorView.findFromDOM(element(mount, ".cm-editor")),
       "restored view",
     );
     expect(restored.state.doc.toString()).toBe(savedText);
@@ -321,10 +325,7 @@ describe("chat pane embedded panels", () => {
       );
       onTestFinished(() => releaseChatMediaResourceOwner(rerender));
       const open = await vi.waitFor(() =>
-        expectDefined(
-          container.querySelector<HTMLButtonElement>(".chat-assistant-attachment-card__expand"),
-          "Open attachment",
-        ),
+        element<HTMLButtonElement>(container, ".chat-assistant-attachment-card__expand"),
       );
       open.click();
       const opened = expectDefined<SidebarContent>(sidebarContent, "Opened attachment");
@@ -352,9 +353,7 @@ describe("chat pane embedded panels", () => {
       expect(panel.textContent).toContain("recording.mp4");
       expect(panel.textContent).not.toContain("Preview unavailable");
       expect(panel.querySelector('[aria-busy="true"]')).not.toBeNull();
-      const video = await vi.waitFor(() =>
-        expectDefined(panel.querySelector("video"), "Pending video"),
-      );
+      const video = await vi.waitFor(() => element<HTMLVideoElement>(panel, "video"));
       expect(video.hasAttribute("src")).toBe(false);
       expect(video.preload).toBe("auto");
       const presentation = panel.querySelector('[role="status"]');
@@ -470,13 +469,9 @@ describe("chat pane embedded panels", () => {
       controller.start();
       try {
         renderAttachment();
-        const open = await vi.waitFor(() => {
-          const button = transcript.querySelector<HTMLButtonElement>(
-            ".chat-assistant-attachment-card__expand",
-          );
-          expect(button).not.toBeNull();
-          return button!;
-        });
+        const open = await vi.waitFor(() =>
+          element<HTMLButtonElement>(transcript, ".chat-assistant-attachment-card__expand"),
+        );
         expect(fetchMetadata).toHaveBeenCalledOnce();
         open.click();
         const content = state.sessionWorkspaceState?.previews.at(-1)?.content;
@@ -534,7 +529,7 @@ describe("chat pane embedded panels", () => {
   );
 
   it("keeps Files closed when a pending file preview completes", async () => {
-    const { file, mount, preview, renderPanels, state } = createReviewFixture();
+    const { mount, preview, renderPanels, settlePreview, state } = createReviewFixture();
     openSessionWorkspaceFile(state, { path: preview.file.path });
     await renderPanels();
     const close = mount.querySelector<HTMLButtonElement>(
@@ -545,14 +540,12 @@ describe("chat pane embedded panels", () => {
     await renderPanels();
     expect(mount.querySelector('[data-panel-slot="detail"]')).toBeNull();
 
-    file.resolve(preview);
-    await file.promise;
-    await renderPanels();
+    await settlePreview();
     expect(mount.querySelector('[data-panel-slot="detail"]')).toBeNull();
   });
 
   it("opens the requested file when an unrelated directory listing completes first", async () => {
-    const { file, list, mount, preview, renderPanels, state } = createReviewFixture();
+    const { file, list, mount, preview, previewAlt, renderPanels, state } = createReviewFixture();
     loadSessionWorkspace(state, getSessionWorkspace(state), true);
     openSessionWorkspaceFile(state, { path: preview.file.path });
     await renderPanels();
@@ -570,17 +563,14 @@ describe("chat pane embedded panels", () => {
     file.resolve(preview);
     await loadedSidebarContent(state);
     await renderPanels();
-    expect(
-      mount.querySelector<HTMLImageElement>(
-        ".chat-files-panel__page:not([hidden]) .chat-tool-card__preview-image",
-      )?.alt,
-    ).toBe("preview.png");
+    expect(previewAlt()).toBe("preview.png");
   });
 
   it.each(["Files", "minimized"] as const)(
     "keeps the operator's %s presentation when a pending preview completes",
     async (presentation) => {
-      const { file, mount, preview, renderPanels, state } = createReviewFixture();
+      const { mount, preview, previewAlt, renderPanels, settlePreview, state } =
+        createReviewFixture();
       openSessionWorkspaceFile(state, { path: preview.file.path });
       await renderPanels();
       if (presentation === "Files") {
@@ -596,9 +586,7 @@ describe("chat pane embedded panels", () => {
       const layout = state.sidebarLayout;
       await renderPanels();
 
-      file.resolve(preview);
-      await file.promise;
-      await renderPanels();
+      await settlePreview();
       expect(state.sidebarLayout).toEqual(layout);
       expect(isSidebarSlotVisible(state.sidebarLayout, "detail")).toBe(false);
       if (presentation === "Files") {
@@ -609,16 +597,13 @@ describe("chat pane embedded panels", () => {
       state.sessionWorkspaceState!.activePreviewId = `file:${preview.file.path}`;
       state.updateSidebarLayout(openSlot(state.sidebarLayout, "workspace"));
       await renderPanels();
-      expect(
-        mount.querySelector<HTMLImageElement>(
-          ".chat-files-panel__page:not([hidden]) .chat-tool-card__preview-image",
-        )?.alt,
-      ).toBe("preview.png");
+      expect(previewAlt()).toBe("preview.png");
     },
   );
 
   it("keeps the newer file visible after an older preview request settles", async () => {
-    const { file, mount, preview, renderPanels, sessions, state } = createReviewFixture();
+    const { preview, previewAlt, renderPanels, sessions, settlePreview, state } =
+      createReviewFixture();
     openSessionWorkspaceFile(state, { path: preview.file.path });
     const replacement = {
       ...preview,
@@ -628,24 +613,14 @@ describe("chat pane embedded panels", () => {
     openSessionWorkspaceFile(state, { path: replacement.file.path });
     await vi.waitFor(async () => {
       await renderPanels();
-      expect(
-        mount.querySelector<HTMLImageElement>(
-          ".chat-files-panel__page:not([hidden]) .chat-tool-card__preview-image",
-        )?.alt,
-      ).toBe("replacement.png");
+      expect(previewAlt()).toBe("replacement.png");
     });
-    file.resolve(preview);
-    await file.promise;
-    await renderPanels();
-    expect(
-      mount.querySelector<HTMLImageElement>(
-        ".chat-files-panel__page:not([hidden]) .chat-tool-card__preview-image",
-      )?.alt,
-    ).toBe("replacement.png");
+    await settlePreview();
+    expect(previewAlt()).toBe("replacement.png");
   });
 
   it("retires a preview across reconnect without refocusing Review over Files", async () => {
-    const { file, mount, preview, renderPanels, state } = createReviewFixture();
+    const { mount, preview, renderPanels, settlePreview, state } = createReviewFixture();
     openSessionWorkspaceFile(state, { path: preview.file.path });
     state.handleOpenSidebar({
       kind: "attachment",
@@ -658,9 +633,7 @@ describe("chat pane embedded panels", () => {
 
     state.connectionEpoch += 1;
     await renderPanels();
-    file.resolve(preview);
-    await file.promise;
-    await renderPanels();
+    await settlePreview();
     expect(isSidebarSlotVisible(state.sidebarLayout, "workspace")).toBe(true);
     expect(state.sessionWorkspaceState?.previews).toEqual([]);
     expect(mount.querySelector(".sidebar-attachment-preview__image")).toBeNull();
@@ -686,20 +659,11 @@ describe("chat pane embedded panels", () => {
   });
 
   it("retains default Review content and collapsed files while switching tabs, focusing Chat, and minimizing", async () => {
-    const request = vi.fn().mockResolvedValue({
-      sessionKey: "agent:main:review",
-      branch: "feature/review",
-      baseRef: "main",
-      additions: 1,
-      deletions: 1,
-      files: [{ path: "example.txt", status: "modified", additions: 1, deletions: 1 }],
-    });
+    const request = diffRequest();
     const mount = document.body.appendChild(createChatSidebarContainer());
     const state = createPageState(
       createInitializationContext(),
-      {
-        afterCommit: () => () => {},
-      },
+      { afterCommit: () => () => {} },
       mount,
     );
     Object.assign(state, {
@@ -806,14 +770,7 @@ describe("chat pane embedded panels", () => {
   });
 
   it("shows why a file could not open instead of falling back to the session diff", async () => {
-    const request = vi.fn().mockResolvedValue({
-      sessionKey: "agent:main:review",
-      branch: "feature/review",
-      baseRef: "main",
-      additions: 1,
-      deletions: 1,
-      files: [{ path: "example.txt", status: "modified", additions: 1, deletions: 1 }],
-    });
+    const request = diffRequest();
     const { mount, renderPanels, state } = createReviewFixture();
     const message = 'Failed to load docs/chat.md: <img src="missing.png">';
     state.client = createGatewayBrowserClientFixture({

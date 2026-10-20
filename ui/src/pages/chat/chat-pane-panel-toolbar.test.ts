@@ -113,10 +113,7 @@ it("retains focused Layout controls and an open menu when header props refresh",
     panelDefinitions: sidebarPanelDefinitions(),
     onLayoutChange: vi.fn(),
   });
-  onTestFinished(() => {
-    mounted.unmount();
-    mounted.container.remove();
-  });
+  onTestFinished(() => mounted.container.remove());
   const trigger = mounted.container.querySelector<HTMLButtonElement>(".chat-pane__layout-trigger")!;
   const menu = mounted.container.querySelector<HTMLElement>(".chat-pane__layout-menu")!;
   const panel = menu.querySelector<HTMLElement>(".oc-menu")!;
@@ -160,7 +157,6 @@ it("keeps a native external panel link when it is the only Layout action", async
     label: "Open panel",
   };
   const mounted = mountChatPaneHeader([], { sidebarLayout: { columns: [] }, panelDefinitions });
-  onTestFinished(mounted.unmount);
   const trigger = mounted.container.querySelector<HTMLButtonElement>(".chat-pane__layout-trigger")!;
   trigger.click();
   await waitForSolid(() =>
