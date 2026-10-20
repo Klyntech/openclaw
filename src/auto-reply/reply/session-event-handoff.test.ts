@@ -81,6 +81,28 @@ const route = {
   threadId: "42",
 };
 
+function joinContinuations() {
+  return Promise.allSettled(
+    continuation.mock.results.flatMap((result) => (result.type === "return" ? [result.value] : [])),
+  );
+}
+
+function enqueueCompletion(
+  expectedTarget: Parameters<typeof enqueueSessionEventForHost>[1]["expectedTarget"],
+  options: Omit<
+    Parameters<typeof enqueueSessionEventForHost>[1],
+    "agentId" | "sessionKey" | "source" | "expectedTarget"
+  > = {},
+) {
+  return enqueueSessionEventForHost("Process completed", {
+    agentId: "main",
+    sessionKey,
+    source: "exec",
+    expectedTarget,
+    ...options,
+  });
+}
+
 async function withTargetFixture(
   run: (fixture: OpenClawTestState & { storePath: string }) => Promise<void>,
   options: { empty?: boolean; native?: boolean } = {},
@@ -109,11 +131,7 @@ async function withTargetFixture(
       } finally {
         resetSystemEventsForTest();
         gatewayWork.resetGatewayWorkAdmission();
-        await Promise.allSettled(
-          continuation.mock.results.flatMap((result) =>
-            result.type === "return" ? [result.value] : [],
-          ),
-        );
+        await joinContinuations();
         expect(gatewayWork.getActiveGatewayRootWorkCount()).toBe(0);
       }
     },
@@ -177,14 +195,7 @@ describe("session event target custody", () => {
         });
         receipt.cancel();
         expect(await withinTest(receipt.settled, signal)).toMatchObject({ status: "cancelled" });
-        await withinTest(
-          Promise.allSettled(
-            continuation.mock.results.flatMap((result) =>
-              result.type === "return" ? [result.value] : [],
-            ),
-          ),
-          signal,
-        );
+        await withinTest(joinContinuations(), signal);
         expect(loadSessionEntry({ ...captured, sessionKey: runKey })).toBeUndefined();
         expect(loadSessionEntry({ ...captured, sessionKey: baseKey })?.sessionId).toBe(
           "captured-session",
@@ -233,12 +244,7 @@ describe("session event target custody", () => {
               "Session event owner is being deleted",
             );
             for (const expectedTarget of [target, undefined]) {
-              const receipt = enqueueSessionEventForHost("Process completed", {
-                agentId: "main",
-                sessionKey,
-                source: "exec",
-                expectedTarget,
-              });
+              const receipt = enqueueCompletion(expectedTarget);
               await expect(receipt.settled).resolves.toMatchObject({
                 status: "failed",
                 executionStarted: false,
@@ -577,14 +583,7 @@ describe("session event target custody", () => {
       expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
       producerActive = false;
       expect(() => assertSessionEventTargetCurrent(target)).toThrow("Background producer retired");
-      expect(() =>
-        enqueueSessionEventForHost("Process completed", {
-          agentId: "main",
-          sessionKey,
-          source: "exec",
-          expectedTarget: target,
-        }),
-      ).toThrow("Background producer retired");
+      expect(() => enqueueCompletion(target)).toThrow("Background producer retired");
       expect(peekSystemEventEntries(sessionKey)).toEqual([]);
     });
   });
@@ -631,12 +630,7 @@ describe("session event target custody", () => {
             }),
           },
         );
-        const receipt = enqueueSessionEventForHost("Process completed", {
-          agentId: "main",
-          sessionKey,
-          source: "exec",
-          expectedTarget: target,
-        });
+        const receipt = enqueueCompletion(target);
 
         await expect(receipt.settled).resolves.toMatchObject({
           status: "failed",
@@ -654,11 +648,7 @@ describe("session event target custody", () => {
     await withTargetFixture(async ({ env }) => {
       const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
       let current = true;
-      const receipt = enqueueSessionEventForHost("Process completed", {
-        agentId: "main",
-        sessionKey,
-        source: "exec",
-        expectedTarget: target,
+      const receipt = enqueueCompletion(target, {
         assertCurrent: () => {
           if (!current) {
             throw new Error("Background producer retired");
@@ -674,11 +664,7 @@ describe("session event target custody", () => {
         error: expect.stringContaining("Background producer retired"),
       });
       // Join the independent owner without requiring a producer to consume its receipt.
-      await Promise.allSettled(
-        continuation.mock.results.flatMap((result) =>
-          result.type === "return" ? [result.value] : [],
-        ),
-      );
+      await joinContinuations();
       expect(receipt.cancel()).toBe(false);
       resetSystemEventsForTest();
       expect(eventLogError).toHaveBeenCalledExactlyOnceWith("session event execution failed", {
@@ -699,12 +685,7 @@ describe("session event target custody", () => {
       const suspension = gatewayWork.tryBeginGatewaySuspendAdmission(() => {});
       expect(suspension?.commit()).toBe(true);
       try {
-        const receipt = enqueueSessionEventForHost("Process completed", {
-          agentId: "main",
-          sessionKey,
-          source: "exec",
-          expectedTarget: target,
-        });
+        const receipt = enqueueCompletion(target);
         expect(peekSystemEventEntries(sessionKey).map((event) => event.id)).toEqual([receipt.id]);
         resetSystemEventsForTest();
 

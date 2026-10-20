@@ -54,16 +54,13 @@ async function makeStorePath(): Promise<string> {
   return path.join(dir, "sessions.json");
 }
 
-it("preempts a running turn and cancels two queued follow-ups before /new resets", async () => {
+async function rolloverFixture(suffix: string) {
   const storePath = await makeStorePath();
-  const sessionKey = "agent:main:telegram:dm:rollover-admission";
-  const sessionId = "session-before-admitted-rollover";
-  const transcriptPath = path.join(path.dirname(storePath), `${sessionId}.jsonl`);
+  const sessionKey = `agent:main:telegram:dm:rollover-${suffix}`;
+  const sessionId = `session-before-${suffix}-rollover`;
   await writeSessionStoreFast(storePath, {
     [sessionKey]: { sessionId, updatedAt: Date.now() },
   });
-  await fs.writeFile(transcriptPath, '{"type":"message"}\n', "utf8");
-
   const target = captureSessionTarget({
     storeScope: storePath,
     sessionKey,
@@ -71,6 +68,30 @@ it("preempts a running turn and cancels two queued follow-ups before /new resets
     incarnation: sessionId,
     agentId: "main",
   });
+  return { storePath, sessionKey, sessionId, target };
+}
+
+function resetSession(storePath: string, sessionKey: string, from: string) {
+  return initSessionState({
+    ctx: {
+      Body: "/new",
+      RawBody: "/new",
+      CommandBody: "/new",
+      From: from,
+      To: "bot",
+      ChatType: "direct",
+      SessionKey: sessionKey,
+      Provider: "telegram",
+      Surface: "telegram",
+    },
+    cfg: { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig,
+  });
+}
+
+it("preempts a running turn and cancels two queued follow-ups before /new resets", async () => {
+  const { storePath, sessionKey, sessionId, target } = await rolloverFixture("admission");
+  const transcriptPath = path.join(path.dirname(storePath), `${sessionId}.jsonl`);
+  await fs.writeFile(transcriptPath, '{"type":"message"}\n', "utf8");
   const runStarted = createDeferred();
   let runInterrupted = false;
   const activeRun = withSessionTurn(
@@ -107,20 +128,7 @@ it("preempts a running turn and cancels two queued follow-ups before /new resets
     ).toBe(true);
   }
   expect(getFollowupQueueDepth(sessionKey)).toBe(2);
-  const initialization = initSessionState({
-    ctx: {
-      Body: "/new",
-      RawBody: "/new",
-      CommandBody: "/new",
-      From: "user-rollover-admission",
-      To: "bot",
-      ChatType: "direct",
-      SessionKey: sessionKey,
-      Provider: "telegram",
-      Surface: "telegram",
-    },
-    cfg: { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig,
-  });
+  const initialization = resetSession(storePath, sessionKey, "user-rollover-admission");
 
   try {
     const result = await initialization;
@@ -137,19 +145,7 @@ it("preempts a running turn and cancels two queued follow-ups before /new resets
 });
 
 it("preserves the rollover timeout error when /new preemption does not settle", async () => {
-  const storePath = await makeStorePath();
-  const sessionKey = "agent:main:telegram:dm:rollover-timeout";
-  const sessionId = "session-before-timeout-rollover";
-  await writeSessionStoreFast(storePath, {
-    [sessionKey]: { sessionId, updatedAt: Date.now() },
-  });
-  const target = captureSessionTarget({
-    storeScope: storePath,
-    sessionKey,
-    aliases: [sessionId],
-    incarnation: sessionId,
-    agentId: "main",
-  });
+  const { storePath, sessionKey, sessionId, target } = await rolloverFixture("timeout");
   const operation = createReplyOperation({
     sessionKey,
     sessionId,
@@ -163,20 +159,7 @@ it("preserves the rollover timeout error when /new preemption does not settle", 
     preemptAttempted.resolve();
     return false;
   });
-  const initialization = initSessionState({
-    ctx: {
-      Body: "/new",
-      RawBody: "/new",
-      CommandBody: "/new",
-      From: "user-rollover-timeout",
-      To: "bot",
-      ChatType: "direct",
-      SessionKey: sessionKey,
-      Provider: "telegram",
-      Surface: "telegram",
-    },
-    cfg: { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig,
-  });
+  const initialization = resetSession(storePath, sessionKey, "user-rollover-timeout");
   void initialization.catch(() => {});
   try {
     await preemptAttempted.promise;

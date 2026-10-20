@@ -79,6 +79,24 @@ vi.mock("../../config/sessions/session-accessor.sqlite-entry.js", () => ({
 
 const { ensureSkillSnapshot } = await import("./session-updates.js");
 
+const sessionKey = "agent:main:main";
+function skillFixture(
+  sessionEntry: NonNullable<Parameters<typeof ensureSkillSnapshot>[0]["sessionEntry"]>,
+) {
+  const sessionStore = { [sessionKey]: sessionEntry };
+  return {
+    agentId: "main",
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    sessionId: sessionEntry.sessionId,
+    storePath: "/tmp/sessions.json",
+    isFirstTurnInSession: true,
+    workspaceDir: TEST_WORKSPACE_DIR,
+    cfg: {},
+  };
+}
+
 describe("ensureSkillSnapshot", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -100,30 +118,9 @@ describe("ensureSkillSnapshot", () => {
   });
 
   it("does not keep a deleted first-turn session entry when persisting skills", async () => {
-    const sessionKey = "agent:main:main";
-    const sessionEntry = {
-      sessionId: "deleted-session",
-      updatedAt: 10,
-    };
-    const sessionStore = { [sessionKey]: sessionEntry };
-    const sessionEntryHandle = createReplySessionEntryHandle({
-      sessionEntry,
-      sessionKey,
-      sessionStore,
-    });
-
-    const result = await ensureSkillSnapshot({
-      agentId: "main",
-      sessionEntry,
-      sessionEntryHandle,
-      sessionStore,
-      sessionKey,
-      sessionId: "deleted-session",
-      storePath: "/tmp/sessions.json",
-      isFirstTurnInSession: true,
-      workspaceDir: TEST_WORKSPACE_DIR,
-      cfg: {},
-    });
+    const fixture = skillFixture({ sessionId: "deleted-session", updatedAt: 10 });
+    const sessionEntryHandle = createReplySessionEntryHandle(fixture);
+    const result = await ensureSkillSnapshot({ ...fixture, sessionEntryHandle });
 
     expect(updateSessionEntryMock).toHaveBeenCalledWith(
       {
@@ -136,13 +133,12 @@ describe("ensureSkillSnapshot", () => {
     expect(result.sessionEntry).toBeUndefined();
     expect(result.systemSent).toBe(false);
     expect(sessionEntryHandle.getCurrent()).toBeUndefined();
-    expect(sessionStore[sessionKey]).toBeUndefined();
+    expect(fixture.sessionStore[sessionKey]).toBeUndefined();
   });
 
   it.each([true, false])(
     "persists only owned skill fields as a partial update (first turn: %s)",
     async (isFirstTurnInSession) => {
-      const sessionKey = "agent:main:main";
       const sessionEntry = {
         sessionId: "session-1",
         updatedAt: 10,
@@ -150,7 +146,8 @@ describe("ensureSkillSnapshot", () => {
         label: "Before rename",
         pinnedAt: 100,
       };
-      const sessionStore = { [sessionKey]: sessionEntry };
+      const fixture = skillFixture(sessionEntry);
+      const { sessionStore } = fixture;
       updateSessionEntryMock.mockImplementationOnce(async (_scope, operation) => {
         const concurrentEntry = {
           sessionId: sessionEntry.sessionId,
@@ -173,17 +170,7 @@ describe("ensureSkillSnapshot", () => {
         return { ...concurrentEntry, ...patch };
       });
 
-      const result = await ensureSkillSnapshot({
-        agentId: "main",
-        sessionEntry,
-        sessionStore,
-        sessionKey,
-        sessionId: "session-1",
-        storePath: "/tmp/sessions.json",
-        isFirstTurnInSession,
-        workspaceDir: TEST_WORKSPACE_DIR,
-        cfg: {},
-      });
+      const result = await ensureSkillSnapshot({ ...fixture, isFirstTurnInSession });
 
       expect(result.sessionEntry?.modelOverride).toBe("sonnet-4.6");
       expect(sessionStore[sessionKey]?.modelOverride).toBe("sonnet-4.6");
