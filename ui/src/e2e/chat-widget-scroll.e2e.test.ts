@@ -83,7 +83,46 @@ async function swipe(
         .map((entry) => entry.offset);
       return { moves: beforeRelease, released: beforeRelease.at(-1) ?? offsets[0]!.offset };
     }, releasedAt);
-    expect(direction * (before - released)).toBeGreaterThan(120);
+    const dragDistance = direction * (before - released);
+    let dragFailureDetails: string | undefined;
+    if (!(dragDistance > 120)) {
+      // Preserve the failed sample while recording whether native scrolling continued.
+      const [recordedOffsets, current, frameClocks] = await Promise.allSettled([
+        scroll.evaluate(({ offsets }) => offsets),
+        thread.evaluate((element, coordinates) => {
+          const hit = document.elementFromPoint(coordinates.x, coordinates.y);
+          return {
+            scrollTop: element.scrollTop,
+            scrollHeight: element.scrollHeight,
+            clientHeight: element.clientHeight,
+            timeOrigin: performance.timeOrigin,
+            now: performance.timeOrigin + performance.now(),
+            hit: hit ? { tag: hit.tagName, classes: hit.getAttribute("class") } : null,
+          };
+        }, point),
+        Promise.all(
+          releases.map((release) =>
+            release.evaluate(({ state }) => ({
+              releaseTime: state.time,
+              timeOrigin: performance.timeOrigin,
+            })),
+          ),
+        ),
+      ]);
+      dragFailureDetails = JSON.stringify({
+        point,
+        direction,
+        before,
+        released,
+        releasedAt,
+        releaseTimes,
+        moves,
+        offsets: recordedOffsets,
+        current,
+        frameClocks,
+      });
+    }
+    expect(dragDistance, dragFailureDetails).toBeGreaterThan(120);
     // A quiet timer window can occur during native inertia; wait for its actual end.
     const completed = await page.waitForFunction(
       async ({ done }) => {
