@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -41,90 +41,70 @@ vi.mock("./openclaw-state-worker-store.js", async (importOriginal) => {
   };
 });
 
-it("publishes the known avatar commit even when ordinary result delivery fails", async () => {
-  const state = await createOpenClawTestState({ layout: "state-only", prefix: "avatar-receipt-" });
-  let release = () => {};
-  try {
-    const profile = ensureProfileForEmail("receipt@example.test");
-    release = (await prepareUserProfileCatalog()).release;
-    const bytes = Uint8Array.from(readFileSync(join(process.cwd(), "ui/public/favicon-32.png")));
-    delivery.fail = true;
-    await expect(
-      adoptTailscaleProfileAvatar(
-        profile.id,
-        "https://avatars.example.test/p",
-        {},
-        {
-          fetchImpl: vi.fn(
-            async () =>
-              new Response(bytes.slice().buffer, {
-                headers: { "content-type": "image/png" },
-              }),
-          ),
-        },
+let state: Awaited<ReturnType<typeof createOpenClawTestState>>;
+let release = () => {};
+let stop = () => {};
+beforeEach(async () => {
+  state = await createOpenClawTestState({ layout: "state-only", prefix: "avatar-worker-" });
+});
+afterEach(async () => {
+  delivery.fail = false;
+  vi.restoreAllMocks();
+  stop();
+  release();
+  stop = release = () => {};
+  await state.cleanup();
+});
+const bytes = Uint8Array.from(readFileSync(join(process.cwd(), "ui/public/favicon-32.png")));
+const adopt = (id: string) =>
+  adoptTailscaleProfileAvatar(
+    id,
+    "https://avatars.example.test/p",
+    {},
+    {
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(bytes.slice().buffer, { headers: { "content-type": "image/png" } }),
       ),
-    ).rejects.toThrow("synthetic result delivery failure");
-    expect(getUserProfileDisplay(profile.id).hasAvatar).toBe(true);
-    expect(getProfileAvatar(profile.id)?.bytes).toEqual(bytes);
-  } finally {
-    delivery.fail = false;
-    release();
-    await state.cleanup();
-  }
+    },
+  );
+
+it("publishes the known avatar commit even when ordinary result delivery fails", async () => {
+  const profile = ensureProfileForEmail("receipt@example.test");
+  release = (await prepareUserProfileCatalog()).release;
+  delivery.fail = true;
+  await expect(adopt(profile.id)).rejects.toThrow("synthetic result delivery failure");
+  expect(getUserProfileDisplay(profile.id).hasAvatar).toBe(true);
+  expect(getProfileAvatar(profile.id)?.bytes).toEqual(bytes);
 });
 
 it("adopts an avatar off-thread and publishes its catalog before identity observers", async () => {
-  const state = await createOpenClawTestState({ layout: "state-only", prefix: "avatar-worker-" });
-  let release = () => {};
-  let stop = () => {};
-  try {
-    const profile = ensureProfileForEmail("portrait@example.test");
-    const alias = ensureProfileForEmail("alias@example.test");
-    linkEmail("alias@example.test", profile.id);
-    release = (await prepareUserProfileCatalog()).release;
-    const seen: unknown[] = [];
-    stop = onUserProfilesChanged(() => {
-      seen.push({
-        display: getUserProfileDisplay(alias.id),
-        identity: readResidentUserProfileIdentity(alias.id),
-      });
+  const profile = ensureProfileForEmail("portrait@example.test");
+  const alias = ensureProfileForEmail("alias@example.test");
+  linkEmail("alias@example.test", profile.id);
+  release = (await prepareUserProfileCatalog()).release;
+  const seen: unknown[] = [];
+  stop = onUserProfilesChanged(() => {
+    seen.push({
+      display: getUserProfileDisplay(alias.id),
+      identity: readResidentUserProfileIdentity(alias.id),
     });
-    requireNodeSqlite();
-    const sql = observeMainThreadSql();
-    const bytes = Uint8Array.from(readFileSync(join(process.cwd(), "ui/public/favicon-32.png")));
-    expect(
-      await adoptTailscaleProfileAvatar(
-        alias.id,
-        "https://avatars.example.test/p",
-        {},
-        {
-          fetchImpl: vi.fn(
-            async () =>
-              new Response(bytes.slice().buffer, {
-                headers: { "content-type": "image/png" },
-              }),
-          ),
-        },
-      ),
-    ).toMatchObject({ id: profile.id, avatarMime: "image/png" });
-    expect(seen).toEqual([
-      {
-        display: expect.objectContaining({ id: profile.id, hasAvatar: true }),
-        identity: {
-          profileId: profile.id,
-          role: null,
-          githubLogin: null,
-          aliases: new Set([profile.id, alias.id]),
-        },
+  });
+  requireNodeSqlite();
+  const sql = observeMainThreadSql();
+  expect(await adopt(alias.id)).toMatchObject({ id: profile.id, avatarMime: "image/png" });
+  expect(seen).toEqual([
+    {
+      display: expect.objectContaining({ id: profile.id, hasAvatar: true }),
+      identity: {
+        profileId: profile.id,
+        role: null,
+        githubLogin: null,
+        aliases: new Set([profile.id, alias.id]),
       },
-    ]);
-    sql.expectIdle();
-    sql.restore();
-    expect(getProfileAvatar(profile.id)?.bytes).toEqual(bytes);
-  } finally {
-    vi.restoreAllMocks();
-    stop();
-    release();
-    await state.cleanup();
-  }
+    },
+  ]);
+  sql.expectIdle();
+  sql.restore();
+  expect(getProfileAvatar(profile.id)?.bytes).toEqual(bytes);
 });

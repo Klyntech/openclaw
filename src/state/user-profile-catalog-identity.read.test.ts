@@ -10,20 +10,29 @@ import { syncGitHubIdentity } from "./user-profile-writes.worker.js";
 
 afterEach(() => vi.restoreAllMocks());
 
+function fixture() {
+  const profile = syncGitHubIdentity({
+    identity: { accountId: 301, login: "person", name: "Original" },
+    authenticationAlias: { kind: "email", email: "person@example.test" },
+  });
+  const { db } = openOpenClawStateDatabase();
+  const read = () =>
+    runSqliteReadOperationSync(db, () =>
+      readUserProfileCatalogIdentity(db, { kind: "source", profileIds: [profile.id, "missing"] }),
+    );
+  return { profile, db, read, sqlite: requireNativeSqliteDatabase(db) };
+}
+
 it("invalidates retained cohorts after worker commits and rollback without freshness probes", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const profile = syncGitHubIdentity({
-      identity: { accountId: 301, login: "person", name: "Original" },
-      authenticationAlias: { kind: "email", email: "person@example.test" },
-    });
-    const database = openOpenClawStateDatabase();
-    const input = { kind: "source", profileIds: [profile.id, "missing"] } as const;
-    const read = () =>
-      runSqliteReadOperationSync(database.db, () =>
-        readUserProfileCatalogIdentity(database.db, input),
-      );
+    const { profile, db, read, sqlite } = fixture();
+    const expectName = (displayName: string) =>
+      expect(read().profiles.get(profile.id)).toMatchObject({
+        ok: true,
+        facts: { profile: { displayName } },
+      });
     const counter = trackSqliteStatementExecutions(
-      requireNativeSqliteDatabase(database.db),
+      sqlite,
       ["profiles", "identities", "freshness"],
       (sql) =>
         /data_version/iu.test(sql)
@@ -35,37 +44,26 @@ it("invalidates retained cohorts after worker commits and rollback without fresh
               : null,
     );
     try {
-      expect(read().profiles.get(profile.id)).toMatchObject({
-        ok: true,
-        facts: { profile: { displayName: "Original" } },
-      });
+      expectName("Original");
       expect(read().profiles.get("missing")).toMatchObject({
         ok: true,
         facts: { profileId: "missing", profile: undefined },
       });
       expect(counter.counts).toEqual({ profiles: 1, identities: 1, freshness: 0 });
       await setCanonicalUserProfileDisplayName(profile.id, "Worker update");
-      expect(read().profiles.get(profile.id)).toMatchObject({
-        ok: true,
-        facts: { profile: { displayName: "Worker update" } },
-      });
+      expectName("Worker update");
       expect(counter.counts).toEqual({ profiles: 2, identities: 2, freshness: 0 });
-      database.db.exec("BEGIN");
+      db.exec("BEGIN");
       try {
-        database.db
-          .prepare("UPDATE user_profiles SET display_name = ? WHERE id = ?")
-          .run("Pending", profile.id);
-        expect(read().profiles.get(profile.id)).toMatchObject({
-          ok: true,
-          facts: { profile: { displayName: "Pending" } },
-        });
+        db.prepare("UPDATE user_profiles SET display_name = ? WHERE id = ?").run(
+          "Pending",
+          profile.id,
+        );
+        expectName("Pending");
       } finally {
-        database.db.exec("ROLLBACK");
+        db.exec("ROLLBACK");
       }
-      expect(read().profiles.get(profile.id)).toMatchObject({
-        ok: true,
-        facts: { profile: { displayName: "Worker update" } },
-      });
+      expectName("Worker update");
     } finally {
       counter.restore();
     }
@@ -74,12 +72,7 @@ it("invalidates retained cohorts after worker commits and rollback without fresh
 
 it("does not replay terminal cohort corruption as scalar profile reads", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const profile = syncGitHubIdentity({
-      identity: { accountId: 401, login: "person" },
-      authenticationAlias: { kind: "email", email: "person@example.test" },
-    });
-    const { db } = openOpenClawStateDatabase();
-    const sqlite = requireNativeSqliteDatabase(db);
+    const { read, sqlite } = fixture();
     const prepare = sqlite.prepare.bind(sqlite);
     const corruption = Object.assign(new Error("database disk image is malformed"), {
       code: "ERR_SQLITE_ERROR",
@@ -91,14 +84,7 @@ it("does not replay terminal cohort corruption as scalar profile reads", async (
       }
       return prepare(sql);
     });
-    expect(() =>
-      runSqliteReadOperationSync(db, () =>
-        readUserProfileCatalogIdentity(db, {
-          kind: "source",
-          profileIds: [profile.id, "missing"],
-        }),
-      ),
-    ).toThrow(corruption);
+    expect(read).toThrow(corruption);
     expect(failure.mock.calls.filter(([sql]) => sql.includes('from "user_profiles"'))).toHaveLength(
       1,
     );

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GIT_COAUTHOR_PREFERENCE_KEY } from "../../packages/gateway-protocol/src/schema/user-profile-constants.js";
+import { GIT_COAUTHOR_PREFERENCE_KEY as coauthor } from "../../packages/gateway-protocol/src/schema/user-profile-constants.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { enableNodeSqliteKyselyStatementCache } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase, requireNodeSqlite } from "../infra/node-sqlite.js";
@@ -58,6 +58,12 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
 
 let options: { path: string };
 
+const ensureProvider = (login: string, name?: string) =>
+  ensureProfileForTailscaleIdentity({ login, name }, options);
+const ensureEmail = (address: string) => ensureProfileForEmail(address, options);
+const avatar = (id: string) => getProfileAvatar(id, options);
+const preferences = (id: string) => getUserPreferences(id, undefined, options);
+
 function github(
   accountId: number,
   login: string,
@@ -102,11 +108,11 @@ describe("user profiles", () => {
   );
 
   it.each(["email", "provider"])("reuses a %s profile created during writer admission", (kind) => {
-    ensureProfileForEmail("schema-ready@example.test", options);
+    ensureEmail("schema-ready@example.test");
     const ensure =
       kind === "email"
-        ? () => ensureProfileForEmail("racing@example.test", options)
-        : () => ensureProfileForTailscaleIdentity({ login: "racing@github" }, options);
+        ? () => ensureEmail("racing@example.test")
+        : () => ensureProvider("racing@github");
     const original = stateDatabase.runOpenClawStateWriteTransaction;
     let competing: ReturnType<typeof ensureProfileForEmail> | undefined;
     vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce(
@@ -121,7 +127,7 @@ describe("user profiles", () => {
   });
 
   it("preserves a custom name saved while waiting to adopt a provider name", () => {
-    const profile = ensureProfileForTailscaleIdentity({ login: "racing@github" }, options);
+    const profile = ensureProvider("racing@github");
     const original = stateDatabase.runOpenClawStateWriteTransaction;
     vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce(
       (operation, databaseOptions, transactionOptions) => {
@@ -129,9 +135,10 @@ describe("user profiles", () => {
         return original(operation, databaseOptions, transactionOptions);
       },
     );
-    expect(
-      ensureProfileForTailscaleIdentity({ login: "racing@github", name: "Provider Name" }, options),
-    ).toMatchObject({ id: profile.id, displayName: "User Chosen" });
+    expect(ensureProvider("racing@github", "Provider Name")).toMatchObject({
+      id: profile.id,
+      displayName: "User Chosen",
+    });
   });
 
   it("publishes a normalized provider subject only once", () => {
@@ -155,7 +162,7 @@ describe("user profiles", () => {
   it.each(["unadmitted", "admitted"] as const)(
     "preserves metadata and display reads on a %s handle across role schema changes",
     (mode) => {
-      const profile = ensureProfileForEmail("reader@example.test", options);
+      const profile = ensureEmail("reader@example.test");
       setUserProfileRole(profile.id, "maintainer", options);
       expect(setAvatar(profile.id, new Uint8Array([1, 2, 3]), "image/png", options).ok).toBe(true);
       const reader =
@@ -213,11 +220,7 @@ describe("user profiles", () => {
     setDisplayName(accountA.id, "Account A Custom", options);
     expect(setAvatar(accountA.id, new Uint8Array([1, 2, 3]), "image/png", options).ok).toBe(true);
     expect(
-      setUserPreferences(
-        accountA.id,
-        { theme: "claw", [GIT_COAUTHOR_PREFERENCE_KEY]: true },
-        options,
-      ),
+      setUserPreferences(accountA.id, { theme: "claw", [coauthor]: true }, options),
     ).toMatchObject({ ok: true });
     const renamed = github(10, "new-login", {
       initialName: "Provider Renamed A",
@@ -232,29 +235,23 @@ describe("user profiles", () => {
       hasAvatar: false,
     });
     expect(accountB.id).not.toBe(accountA.id);
-    expect(getUserPreferences(accountB.id, undefined, options)).toEqual({});
-    expect(ensureProfileForTailscaleIdentity({ login: "10@github" }, options).id).toBe(accountB.id);
+    expect(preferences(accountB.id)).toEqual({});
+    expect(ensureProvider("10@github").id).toBe(accountB.id);
     expect(getUserProfileListItem(accountA.id, options)).toMatchObject({
       displayName: "Account A Custom",
       githubIdentity: { login: "new-login" },
       hasAvatar: true,
     });
-    expect(getProfileAvatar(accountA.id, options)?.bytes).toEqual(new Uint8Array([1, 2, 3]));
-    expect(getUserPreferences(accountA.id, undefined, options)).toEqual({
-      theme: "claw",
-      [GIT_COAUTHOR_PREFERENCE_KEY]: true,
-    });
+    expect(avatar(accountA.id)?.bytes).toEqual(new Uint8Array([1, 2, 3]));
+    expect(preferences(accountA.id)).toEqual({ theme: "claw", [coauthor]: true });
   });
 
   it("persists GitHub names on the surviving merge head", async () => {
     const target = github(10, "Ada", { alias: "ada" });
     setDisplayName(target.id, "Ada", options);
-    const source = ensureProfileForEmail("alias@example.com", options);
+    const source = ensureEmail("alias@example.com");
     setDisplayName(source.id, "Source Custom", options);
-    const updated = github(10, "Ada", {
-      name: "Ada Lovelace",
-      email: "alias@example.com",
-    });
+    const updated = github(10, "Ada", { name: "Ada Lovelace", email: "alias@example.com" });
     expect(updated).toMatchObject({ id: target.id, displayName: "Ada Lovelace" });
     closeOpenClawStateDatabaseForTest();
     catalogReleases.push((await prepareUserProfileCatalog(options)).release);
@@ -262,7 +259,7 @@ describe("user profiles", () => {
       id: target.id,
       displayName: "Ada Lovelace",
     });
-    expect(ensureProfileForEmail("alias@example.com", options).id).toBe(target.id);
+    expect(ensureEmail("alias@example.com").id).toBe(target.id);
   });
 
   it("moves a reused Cloudflare email without exposing the prior verified owner", () => {
@@ -285,13 +282,13 @@ describe("user profiles", () => {
       emails: [],
       githubIdentity: { login: "account-a" },
     });
-    expect(getUserPreferences(accountA.id, undefined, options)).toEqual({ theme: "claw" });
-    expect(getUserPreferences(accountB.id, undefined, options)).toEqual({});
+    expect(preferences(accountA.id)).toEqual({ theme: "claw" });
+    expect(preferences(accountB.id)).toEqual({});
   });
 
   it("keeps retired GitHub attribution rows inert during verified sync", () => {
-    const matching = ensureProfileForTailscaleIdentity({ login: "ada@github" }, options);
-    const mismatched = ensureProfileForTailscaleIdentity({ login: "grace@github" }, options);
+    const matching = ensureProvider("ada@github");
+    const mismatched = ensureProvider("grace@github");
     const db = openOpenClawStateDatabase(options).db;
     const insert = db.prepare(
       "INSERT INTO user_profile_identities (provider, subject, profile_id, canonical_login, created_at) VALUES ('github-attribution', ?, ?, ?, 1)",
@@ -300,53 +297,48 @@ describe("user profiles", () => {
     insert.run("99", mismatched.id, "wrong-account");
     expect(github(10, "ada")).toMatchObject({ githubIdentity: { login: "ada" } });
     github(11, "grace");
-    expect(getUserPreferences(matching.id, [GIT_COAUTHOR_PREFERENCE_KEY], options)).toEqual({});
-    expect(getUserPreferences(mismatched.id, [GIT_COAUTHOR_PREFERENCE_KEY], options)).toEqual({});
+    expect(getUserPreferences(matching.id, [coauthor], options)).toEqual({});
+    expect(getUserPreferences(mismatched.id, [coauthor], options)).toEqual({});
   });
 
   it("keeps co-author consent with the verified account that survives an email merge", () => {
     const discarded = github(10, "discarded", { email: "discarded@example.com" });
     const established = github(11, "established", { email: "established@example.com" });
-    setUserPreferences(discarded.id, { [GIT_COAUTHOR_PREFERENCE_KEY]: true }, options);
+    setUserPreferences(discarded.id, { [coauthor]: true }, options);
     expect(
       linkEmail("discarded@example.com", established.id, options).githubIdentity,
     ).toMatchObject({ login: "established" });
-    expect(getUserPreferences(established.id, [GIT_COAUTHOR_PREFERENCE_KEY], options)).toEqual({});
+    expect(getUserPreferences(established.id, [coauthor], options)).toEqual({});
     const carrying = github(12, "carrying", { email: "carrying@example.com" });
-    const unverified = ensureProfileForEmail("unverified@example.com", options);
-    setUserPreferences(carrying.id, { [GIT_COAUTHOR_PREFERENCE_KEY]: true }, options);
+    const unverified = ensureEmail("unverified@example.com");
+    setUserPreferences(carrying.id, { [coauthor]: true }, options);
     expect(linkEmail("carrying@example.com", unverified.id, options).githubIdentity).toMatchObject({
       login: "carrying",
     });
-    expect(getUserPreferences(unverified.id, [GIT_COAUTHOR_PREFERENCE_KEY], options)).toEqual({
-      [GIT_COAUTHOR_PREFERENCE_KEY]: true,
-    });
+    expect(getUserPreferences(unverified.id, [coauthor], options)).toEqual({ [coauthor]: true });
   });
 
   it("adopts a Tailscale name into a blank slot and preserves later custom edits", () => {
-    const profile = ensureProfileForTailscaleIdentity(
-      { login: "ada@github", name: "Ada Provider" },
-      options,
-    );
+    const profile = ensureProvider("ada@github", "Ada Provider");
     setDisplayName(profile.id, " \t ", options);
     const version = readUserProfileVersion();
-    expect(
-      ensureProfileForTailscaleIdentity({ login: "ada@github", name: "Ada Adopted" }, options),
-    ).toMatchObject({ displayName: "Ada Adopted" });
+    expect(ensureProvider("ada@github", "Ada Adopted")).toMatchObject({
+      displayName: "Ada Adopted",
+    });
     expect(readUserProfileVersion()).toBe(version + 1);
     setDisplayName(profile.id, "User Chosen", options);
-    expect(
-      ensureProfileForTailscaleIdentity({ login: "ada@github", name: "Provider Changed" }, options),
-    ).toMatchObject({ displayName: "User Chosen" });
+    expect(ensureProvider("ada@github", "Provider Changed")).toMatchObject({
+      displayName: "User Chosen",
+    });
     expect(readUserProfileVersion()).toBe(version + 2);
   });
 
   it("updates all profiles whose aliases change", () => {
     const now = vi.spyOn(Date, "now");
     now.mockReturnValue(100);
-    const source = ensureProfileForEmail("source@example.com", options);
+    const source = ensureEmail("source@example.com");
     now.mockReturnValue(200);
-    const target = ensureProfileForEmail("target@example.com", options);
+    const target = ensureEmail("target@example.com");
     now.mockReturnValue(300);
     linkEmail("source-alias@example.com", source.id, options);
     now.mockReturnValue(400);
@@ -365,10 +357,7 @@ describe("user profiles", () => {
   });
 
   it("keeps the avatar empty after a wrong-type fetch", async () => {
-    const initial = ensureProfileForTailscaleIdentity(
-      { login: "avatar-failure@github", name: "Still Authenticated" },
-      options,
-    );
+    const initial = ensureProvider("avatar-failure@github", "Still Authenticated");
     const fetchImpl = vi.fn(
       async () => new Response("not an image", { headers: { "content-type": "text/plain" } }),
     );
@@ -377,16 +366,13 @@ describe("user profiles", () => {
     });
     expect(fetchImpl).toHaveBeenCalled();
     expect(profile).toMatchObject({ displayName: "Still Authenticated", avatarMime: null });
-    expect(getProfileAvatar(profile.id, options)).toBeUndefined();
+    expect(avatar(profile.id)).toBeUndefined();
   });
 
   it("preserves a user avatar written while provider bytes are in flight", async () => {
     const entered = createDeferredCore();
     const response = createDeferredCore<Response>();
-    const profile = ensureProfileForTailscaleIdentity(
-      { login: "avatar-race@github", name: "Race User" },
-      options,
-    );
+    const profile = ensureProvider("avatar-race@github", "Race User");
     const pending = adoptTailscaleProfileAvatar(profile.id, avatarUrl, options, {
       fetchImpl: vi.fn(async () => {
         entered.resolve();
@@ -405,7 +391,7 @@ describe("user profiles", () => {
       response.resolve(avatarResponse());
       await pending;
       expect(readUserProfileVersion()).toBe(version);
-      expect(getProfileAvatar(profile.id, options)?.bytes).toEqual(new Uint8Array([9, 8, 7]));
+      expect(avatar(profile.id)?.bytes).toEqual(new Uint8Array([9, 8, 7]));
     } finally {
       response.resolve(new Response("unavailable", { status: 503 }));
       await Promise.allSettled([pending]);
@@ -413,8 +399,8 @@ describe("user profiles", () => {
   });
 
   it("migrates legacy provider logins while preserving profiles and real emails", async () => {
-    const provider = ensureProfileForEmail("user@github", options);
-    const email = ensureProfileForEmail("person@gmail.com", options);
+    const provider = ensureEmail("user@github");
+    const email = ensureEmail("person@gmail.com");
     setDisplayName(provider.id, "User Chosen", options);
     expect(setAvatar(provider.id, new Uint8Array([9, 8, 7]), "image/png", options).ok).toBe(true);
     expect(migrateLegacyTailscaleProfileIdentities(options)).toEqual({
@@ -431,11 +417,11 @@ describe("user profiles", () => {
     ]);
     catalogReleases.push((await prepareUserProfileCatalog(options)).release);
     expect(getUserProfileDisplay(provider.id, options).displayName).toBe("User Chosen");
-    expect(getProfileAvatar(provider.id, options)?.bytes).toEqual(new Uint8Array([9, 8, 7]));
+    expect(avatar(provider.id)?.bytes).toEqual(new Uint8Array([9, 8, 7]));
   });
 
   it("rejects oversized and unsupported avatar uploads", () => {
-    const profile = ensureProfileForEmail("ada@example.com", options);
+    const profile = ensureEmail("ada@example.com");
     expect(setAvatar(profile.id, new Uint8Array(512 * 1024 + 1), "image/png", options)).toEqual({
       ok: false,
       error: { code: "avatar_too_large", maxBytes: 512 * 1024 },

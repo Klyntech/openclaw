@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -26,15 +26,20 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
   });
 });
 
-function stateOptions() {
-  return { path: join(tempDirs.make("openclaw-owner-migration-"), "openclaw.sqlite") };
-}
+let options: { path: string };
+beforeEach(() => {
+  options = { path: join(tempDirs.make("openclaw-owner-migration-"), "openclaw.sqlite") };
+});
+const repair = (shouldRepair: boolean) =>
+  repairMergedGatewayOwnerProfile({ ...options, shouldRepair });
+const readProfile = (id: string) =>
+  readUserProfileSnapshotSync(options).profiles.find((row) => row.id === id);
+const unchanged = { repaired: false, changes: [], warnings: [] };
 
 describe("Doctor gateway owner repair", () => {
   it.each(["tombstone", "person", "missing"])(
     "reports then repairs a merged owner with its identity targeting %s once",
     async (identityTarget) => {
-      const options = stateOptions();
       const owner = ensureGatewayOwnerProfile("Local Owner", options);
       const person = mergeOwnerIntoPerson(owner.id, options);
       syncGitHubIdentity(
@@ -52,16 +57,14 @@ describe("Doctor gateway owner repair", () => {
       } else if (identityTarget === "missing") {
         db.prepare("DELETE FROM user_profile_identities WHERE provider = 'gateway.local'").run();
       }
-      const personBefore = readUserProfileSnapshotSync(options).profiles.find(
-        (profile) => profile.id === person.id,
-      );
+      const personBefore = readProfile(person.id);
       const before = profileState(options);
       const aliasRevision = readUserProfileAliasRevision();
       catalogReleases.push((await prepareUserProfileCatalog(options)).release);
       expect(readUserProfileAliases(owner.id, options)).toEqual(new Set([owner.id, person.id]));
       expect(readUserProfileAliases(person.id, options)).toEqual(new Set([owner.id, person.id]));
 
-      expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair: false })).toMatchObject({
+      expect(repair(false)).toMatchObject({
         repaired: false,
         changes: [],
         warnings: [expect.stringContaining("openclaw doctor --fix")],
@@ -70,16 +73,14 @@ describe("Doctor gateway owner repair", () => {
       expect(readUserProfileAliasRevision()).toBe(aliasRevision);
       expect(() =>
         runOpenClawStateWriteTransaction(() => {
-          expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair: true }).repaired).toBe(
-            true,
-          );
+          expect(repair(true).repaired).toBe(true);
           expect(readUserProfileAliasRevision()).toBe(aliasRevision);
           throw new Error("rollback owner repair");
         }, options),
       ).toThrow("rollback owner repair");
       expect(readUserProfileAliasRevision()).toBe(aliasRevision);
       expect(profileState(options)).toEqual(before);
-      expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair: true })).toMatchObject({
+      expect(repair(true)).toMatchObject({
         repaired: true,
         changes: [expect.stringContaining("gateway-owner")],
         warnings: [],
@@ -94,9 +95,7 @@ describe("Doctor gateway owner repair", () => {
         displayName: "Local Owner",
       });
       expect(restored.updatedAt).toBeGreaterThan(1);
-      expect(
-        readUserProfileSnapshotSync(options).profiles.find((profile) => profile.id === person.id),
-      ).toEqual(personBefore);
+      expect(readProfile(person.id)).toEqual(personBefore);
       expect(
         db
           .prepare(
@@ -105,11 +104,7 @@ describe("Doctor gateway owner repair", () => {
           .get(),
       ).toEqual({ profile_id: owner.id });
       const repairedState = profileState(options);
-      expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair: true })).toEqual({
-        repaired: false,
-        changes: [],
-        warnings: [],
-      });
+      expect(repair(true)).toEqual(unchanged);
       expect(readUserProfileAliasRevision()).toBe(aliasRevision + 1);
       closeOpenClawStateDatabaseForTest();
       expect(profileState(options)).toEqual(repairedState);
@@ -119,7 +114,6 @@ describe("Doctor gateway owner repair", () => {
   it.each([false, true])(
     "preserves an unmerged legacy owner and replaces a merged one (merged: %s)",
     (merged) => {
-      const options = stateOptions();
       const legacy = ensureProfileForTailscaleIdentity({ login: "legacy@other" }, options);
       if (merged) {
         mergeOwnerIntoPerson(legacy.id, options);
@@ -130,9 +124,7 @@ describe("Doctor gateway owner repair", () => {
       ).run(legacy.id);
       const before = profileState(options);
       const aliasRevision = readUserProfileAliasRevision();
-      expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair: true }).repaired).toBe(
-        merged,
-      );
+      expect(repair(true).repaired).toBe(merged);
       if (!merged) {
         expect(profileState(options)).toEqual(before);
       } else {
@@ -152,13 +144,8 @@ describe("Doctor gateway owner repair", () => {
   it.each([false, true])(
     "does not create profile state on an unused Gateway (fix: %s)",
     (shouldRepair) => {
-      const options = stateOptions();
       const aliasRevision = readUserProfileAliasRevision();
-      expect(repairMergedGatewayOwnerProfile({ ...options, shouldRepair })).toEqual({
-        repaired: false,
-        changes: [],
-        warnings: [],
-      });
+      expect(repair(shouldRepair)).toEqual(unchanged);
       expect(existsSync(options.path)).toBe(false);
       expect(readUserProfileAliasRevision()).toBe(aliasRevision);
     },
