@@ -56,18 +56,11 @@ suite.define(() => {
       const header = adaSection.locator(".sidebar-recent-sessions__head");
       await header.hover();
       await expectBrowser(header.locator(".sidebar-session-group-actions")).toHaveCount(0);
-      const beforeFilter = (await gateway.getRequests("sessions.list")).length;
+      const filterMatch = { ownerId: "profile-ada" };
+      const beforeFilter = (await gateway.getRequests("sessions.list", filterMatch)).length;
       await chooseSidebarOwner(page, "owner:profile-ada");
       await closeSidebarMenu(page);
-      await expect
-        .poll(async () => (await gateway.getRequests("sessions.list")).slice(beforeFilter))
-        .toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              params: expect.objectContaining({ ownerId: "profile-ada" }),
-            }),
-          ]),
-        );
+      await gateway.waitForRequest("sessions.list", { match: filterMatch, after: beforeFilter });
       await expectBrowser(bobSection).toHaveCount(0);
       await expectBrowser(adaSection.getByText("Ada research", { exact: true })).toBeVisible();
       const ownerChip = page.locator("#sidebar-session-owner-title");

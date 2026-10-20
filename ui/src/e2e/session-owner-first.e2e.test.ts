@@ -2,12 +2,13 @@ import { expect, it } from "vitest";
 import { SIDEBAR_SESSION_ROSTER_LIMIT } from "../../../src/shared/session-list-limits.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
-import { captureSessionOwnerProof } from "./session-ownership-visuals.test-support.ts";
+import { ownerRoster } from "./session-ownership-fixtures.test-support.ts";
 import { selectAllSidebarSessions } from "./sidebar-navigation.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Control UI owner-first session roster" });
 const rosterMatch = { includeGlobal: true, ownerFirst: true };
 const mineMatch = { includeGlobal: true, ownerId: "profile-ada" };
+const rosterParams = { ownerFirst: true, limit: SIDEBAR_SESSION_ROSTER_LIMIT };
 
 function sessionsList() {
   const sessions = ["ada", "bob"].map((name, index) => {
@@ -21,14 +22,10 @@ function sessionsList() {
       updatedAt: 2 - index,
     };
   });
-  return {
-    count: sessions.length,
-    owners: sessions.map((session) => session.owner.actor),
-    defaults: { contextTokens: null, model: null, modelProvider: null },
-    path: "",
+  return ownerRoster(
     sessions,
-    ts: 1,
-  };
+    sessions.map((session) => session.owner.actor),
+  );
 }
 
 suite.define(() => {
@@ -47,10 +44,7 @@ suite.define(() => {
       await page.goto(`${suite.server?.baseUrl ?? ""}chat/main/~key/ada`);
       expect((await gateway.waitForRequest("sessions.subscribe")).params).toEqual({});
       const roster = await gateway.waitForRequest("sessions.list", { match: rosterMatch });
-      expect(roster.params).toMatchObject({
-        ownerFirst: true,
-        limit: SIDEBAR_SESSION_ROSTER_LIMIT,
-      });
+      expect(roster.params).toMatchObject(rosterParams);
       const adaRow = page.locator('[data-session-key="agent:main:ada"]');
       const bobRow = page.locator('[data-session-key="agent:main:bob"]');
       // The selected session can resolve independently while the roster is deferred.
@@ -74,16 +68,12 @@ suite.define(() => {
         after: 1,
         match: rosterMatch,
       });
-      expect(allRoster.params).toMatchObject({
-        ownerFirst: true,
-        limit: SIDEBAR_SESSION_ROSTER_LIMIT,
-      });
+      expect(allRoster.params).toMatchObject(rosterParams);
       expect(allRoster.params).not.toHaveProperty("ownerId");
       await bobRow.waitFor();
       expect(await gateway.getRequests("sessions.list", rosterMatch)).toHaveLength(2);
       expect(await gateway.getRequests("sessions.list", mineMatch)).toHaveLength(1);
       expect(await gateway.getRequests("sessions.list", { includeGlobal: true })).toHaveLength(3);
-      await captureSessionOwnerProof(suite, page, "owner-first-bootstrap.png");
     } finally {
       await context.close();
     }

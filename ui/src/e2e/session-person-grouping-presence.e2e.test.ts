@@ -4,9 +4,6 @@ import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 import { sessionsList } from "./session-ownership-fixtures.test-support.ts";
 import {
-  captureSessionOwnerPageProof,
-  captureSessionOwnerProof,
-  createSessionOwnershipProofContext,
   openSidebarSortMenu,
   routeAvatarFixtures,
 } from "./session-ownership-visuals.test-support.ts";
@@ -19,7 +16,7 @@ const suite = createControlUiE2eSuite({
 
 suite.define(() => {
   it("shows row owners only for live presence under person headers", async () => {
-    const context = await createSessionOwnershipProofContext(suite, "session-owner-stack");
+    const context = await suite.browser.newContext({ viewport: { height: 800, width: 1200 } });
     const page = await context.newPage();
     await routeAvatarFixtures(page, [
       { id: "profile-ada", background: "#3f6f76", label: "A" },
@@ -49,45 +46,32 @@ suite.define(() => {
 
       await gateway.emitGatewayEvent("presence", {
         presence: [
-          {
-            instanceId: "ada-browser",
-            mode: "webchat",
-            reason: "connect",
-            ts: Date.now(),
-            user: {
-              id: "profile-ada",
-              identity: { type: "profile", id: "profile-ada" },
-              name: "Ada",
-              avatarUrl: "/api/users/profile-ada/avatar?v=1",
-            },
-            watchedSessions: ["agent:main:ada"],
+          ["ada", "Ada", "ada"],
+          ["morgan", "Morgan", "bob"],
+        ].map(([id, name, session]) => ({
+          instanceId: `${id}-browser`,
+          mode: "webchat",
+          reason: "connect",
+          ts: Date.now(),
+          user: {
+            id: `profile-${id}`,
+            identity: { type: "profile", id: `profile-${id}` },
+            name,
+            avatarUrl: `/api/users/profile-${id}/avatar?v=1`,
           },
-          {
-            instanceId: "morgan-browser",
-            mode: "webchat",
-            reason: "connect",
-            ts: Date.now(),
-            user: {
-              id: "profile-morgan",
-              identity: { type: "profile", id: "profile-morgan" },
-              name: "Morgan",
-              avatarUrl: "/api/users/profile-morgan/avatar?v=1",
-            },
-            watchedSessions: ["agent:main:bob"],
-          },
-        ],
+          watchedSessions: [`agent:main:${session}`],
+        })),
       });
       await expectBrowser(
         adaSection.locator(".session-owner-chip:not(.session-owner-chip--away)"),
       ).toHaveCount(1);
       await expectBrowser(bobSection.locator('[data-viewer-id="profile-morgan"]')).toHaveCount(1);
-      await captureSessionOwnerProof(suite, page, "person-grouping-live-presence.png");
+
       await expectBrowser(bobSection.locator("openclaw-session-owner-chip")).toHaveCount(0);
       const adaHeader = adaSection.locator(".sidebar-recent-sessions__head");
       await adaHeader.hover();
-      await captureSessionOwnerProof(suite, page, "person-grouping-header-hover.png");
+
       await page.mouse.move(0, 0);
-      await captureSessionOwnerProof(suite, page, "person-grouping-owner-online.png");
 
       const textColor = await page.locator(".sidebar-sessions").evaluate((sidebar) => {
         const probe = document.createElement("span");
@@ -111,9 +95,7 @@ suite.define(() => {
       await adaSection.locator("[data-person-card]").hover();
       const adaCard = page.getByRole("dialog", { name: "Activity for Ada" });
       await expectBrowser(adaCard).toBeVisible();
-      await captureSessionOwnerPageProof(suite, adaCard, "person-grouping-header-card.png", [
-        adaCard.getByRole("link", { name: "View activity", exact: true }),
-      ]);
+
       await page.mouse.move(0, 0);
       await adaCard.waitFor({ state: "detached" });
       await bobSection.locator("[data-person-card]").hover();

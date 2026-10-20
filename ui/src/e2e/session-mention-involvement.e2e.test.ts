@@ -1,9 +1,8 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import { expect as expectBrowser } from "playwright/test";
 import { expect, it } from "vitest";
 import { defaultControlUiFeatureMethods } from "../test-helpers/control-ui-e2e.ts";
 import {
-  captureUiProof,
   controlUiSessionUrl,
   createSessionManagementE2eSuite,
   installMockGateway,
@@ -35,64 +34,62 @@ const home = session(homeKey, "My work", bob, 120_000);
 const mentioned = session(sessionKey, "Design review", ada, 60_000);
 const list = (rows: unknown[]) => ({ ...sessionsListResponse(rows), owners: [ada, bob] });
 
-function installGateway(page: Page, multiple: boolean, collaboration = false) {
-  return installMockGateway(page, {
-    sessionKey: homeKey,
-    hasMultipleSessionSharingIdentities: multiple,
-    featureMethods: [...defaultControlUiFeatureMethods, "sessions.setInvolvement"],
-    historyMessages: [
-      { role: "assistant", content: [{ type: "text", text: "Ready for collaboration." }] },
-    ],
-    ...(collaboration
-      ? {
-          presenceUsers: [{ self: true, id: bob.id, identity: bob.identity, name: bob.label }],
-        }
-      : {}),
-    methodResponses: {
-      "sessions.list": list([home, mentioned]),
-      ...(collaboration ? { "sessions.setInvolvement": { ok: true } } : {}),
+function withSession(
+  multiple: boolean,
+  run: (
+    page: Page,
+    gateway: Awaited<ReturnType<typeof installMockGateway>>,
+    target: Locator,
+  ) => Promise<void>,
+  collaboration = false,
+) {
+  return suite.withPage(
+    { viewport: { width: 1200, height: 820 }, colorScheme: "dark" },
+    async ({ page }) => {
+      const gateway = await installMockGateway(page, {
+        sessionKey: homeKey,
+        hasMultipleSessionSharingIdentities: multiple,
+        featureMethods: [...defaultControlUiFeatureMethods, "sessions.setInvolvement"],
+        historyMessages: [
+          { role: "assistant", content: [{ type: "text", text: "Ready for collaboration." }] },
+        ],
+        ...(collaboration
+          ? {
+              presenceUsers: [{ self: true, id: bob.id, identity: bob.identity, name: bob.label }],
+            }
+          : {}),
+        methodResponses: {
+          "sessions.list": list([home, mentioned]),
+          ...(collaboration ? { "sessions.setInvolvement": { ok: true } } : {}),
+        },
+      });
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, homeKey));
+      await waitForSessionRosterHydration(page);
+      if (collaboration) {
+        await selectAllSidebarSessions(page);
+      }
+      const target = page.locator(`[data-session-key="${sessionKey}"]`);
+      await expectBrowser(target).toBeVisible();
+      await run(page, gateway, target);
     },
-  });
+  );
 }
 
 suite.define(() => {
-  it.each([false, true])(
-    "offers personal visibility only with multiple identities (%s)",
-    async (multiple) => {
-      await suite.withPage(
-        { viewport: { width: 1200, height: 820 }, colorScheme: "dark" },
-        async ({ page }) => {
-          await installGateway(page, multiple);
-          await page.goto(controlUiSessionUrl(suite.server.baseUrl, homeKey));
-          await waitForSessionRosterHydration(page);
-          const target = page.locator('[data-session-key="' + sessionKey + '"]');
-          await expectBrowser(target).toBeVisible();
-          await target.hover();
-          await target.click({ button: "right" });
-          await expectBrowser(page.locator('openclaw-session-menu [value="rename"]')).toBeVisible();
-          await captureUiProof(
-            suite,
-            page,
-            multiple ? "06-multiple-identities-menu.png" : "05-single-identity-menu.png",
-          );
-          await expectBrowser(
-            page.locator('openclaw-session-menu [value="toggle-involving-me"]'),
-          ).toHaveCount(multiple ? 1 : 0);
-        },
-      );
-    },
-  );
+  it("omits personal visibility with a single identity", () =>
+    withSession(false, async (page, _gateway, target) => {
+      await target.hover();
+      await target.click({ button: "right" });
+      await expectBrowser(page.locator('openclaw-session-menu [value="rename"]')).toBeVisible();
+      await expectBrowser(
+        page.locator('openclaw-session-menu [value="toggle-involving-me"]'),
+      ).toHaveCount(0);
+    }));
 
-  it("refreshes an involving-me list on mention and offers reversible personal hiding", async () => {
-    await suite.withPage(
-      { viewport: { width: 1200, height: 820 }, colorScheme: "dark" },
-      async ({ page }) => {
-        const gateway = await installGateway(page, true, true);
-        await page.goto(controlUiSessionUrl(suite.server.baseUrl, homeKey));
-        await waitForSessionRosterHydration(page);
-        await selectAllSidebarSessions(page);
-        const target = page.locator('[data-session-key="' + sessionKey + '"]');
-        await expectBrowser(target).toBeVisible();
+  it("refreshes an involving-me list on mention and offers reversible personal hiding", () =>
+    withSession(
+      true,
+      async (page, gateway, target) => {
         const chooseFilter = async (value: "all" | "involving-me") => {
           await chooseSidebarOwner(page, value);
           await closeSidebarMenu(page);
@@ -100,7 +97,6 @@ suite.define(() => {
         await gateway.setMethodResponse("sessions.list", list([home]));
         await chooseFilter("involving-me");
         await expectBrowser(target).toHaveCount(0);
-        await captureUiProof(suite, page, "01-before-mention.png");
 
         // The Gateway owner test proves mention commit -> involvement. Here the real
         // client receives that owner's event while its filtered list is already open.
@@ -117,47 +113,43 @@ suite.define(() => {
           after: beforeMention,
         });
         await expectBrowser(target).toBeVisible();
-        await captureUiProof(suite, page, "02-after-mention.png");
-        await target.hover();
-        await target.click({ button: "right" });
-        const hide = page.getByRole("menuitem", { name: "Hide from Involving me", exact: true });
-        await expectBrowser(hide).toBeVisible();
-        await captureUiProof(suite, page, "03-personal-hide-menu.png");
-        await gateway.deferNext("sessions.setInvolvement");
-        await hide.click();
-        const request = await gateway.waitForRequest("sessions.setInvolvement");
-        expect(request.params).toMatchObject({
-          key: sessionKey,
-          expectedSessionId: mentioned.sessionId,
-          hidden: true,
-        });
-        const hiddenMentioned = { ...mentioned, hiddenFromInvolvingMe: true };
-        await gateway.setSessionsListResponse(list([home, hiddenMentioned]));
-        await gateway.setMethodResponse("sessions.list", list([home]));
-        await gateway.resolveDeferred("sessions.setInvolvement", { ok: true });
-        await expectBrowser(target).toHaveCount(0);
 
+        const hiddenMentioned = { ...mentioned, hiddenFromInvolvingMe: true };
+        const setHidden = async (hidden: boolean) => {
+          await target.hover();
+          await target.click({ button: "right" });
+          if (!hidden) {
+            await page.getByRole("menuitem", { name: "Advanced", exact: true }).click();
+          }
+          const action = page.getByRole("menuitem", {
+            name: hidden ? "Hide from Involving me" : "Show in Involving me",
+            exact: true,
+          });
+          await expectBrowser(action).toBeVisible();
+
+          await gateway.deferNext("sessions.setInvolvement");
+          await action.click();
+          const request = await gateway.waitForRequest(
+            "sessions.setInvolvement",
+            hidden ? undefined : { after: 1 },
+          );
+          expect(request.params).toMatchObject({
+            key: sessionKey,
+            expectedSessionId: mentioned.sessionId,
+            hidden,
+          });
+          await gateway.setSessionsListResponse(list([home, hidden ? hiddenMentioned : mentioned]));
+          if (hidden) {
+            await gateway.setMethodResponse("sessions.list", list([home]));
+          }
+          await gateway.resolveDeferred("sessions.setInvolvement", { ok: true });
+        };
+        await setHidden(true);
+        await expectBrowser(target).toHaveCount(0);
         await gateway.setMethodResponse("sessions.list", list([home, hiddenMentioned]));
         await chooseFilter("all");
         await expectBrowser(target).toBeVisible();
-        await target.hover();
-        await target.click({ button: "right" });
-        await page.getByRole("menuitem", { name: "Advanced", exact: true }).click();
-        const show = page.getByRole("menuitem", { name: "Show in Involving me", exact: true });
-        await expectBrowser(show).toBeVisible();
-        await captureUiProof(suite, page, "04-restore-from-all-owners.png");
-        await gateway.deferNext("sessions.setInvolvement");
-        await show.click();
-        const restoreRequest = await gateway.waitForRequest("sessions.setInvolvement", {
-          after: 1,
-        });
-        expect(restoreRequest.params).toMatchObject({
-          key: sessionKey,
-          expectedSessionId: mentioned.sessionId,
-          hidden: false,
-        });
-        await gateway.setSessionsListResponse(list([home, mentioned]));
-        await gateway.resolveDeferred("sessions.setInvolvement", { ok: true });
+        await setHidden(false);
         await chooseFilter("involving-me");
         await expectBrowser(target).toBeVisible();
         expect(await gateway.getRequests("sessions.setInvolvement")).toHaveLength(2);
@@ -166,6 +158,6 @@ suite.define(() => {
         await expectBrowser(target).toBeVisible();
         expect(await gateway.getRequests("sessions.patch")).toHaveLength(0);
       },
-    );
-  });
+      true,
+    ));
 });
