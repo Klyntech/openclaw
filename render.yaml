@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: openclaw
+    name: nallyclaw
     runtime: docker
     plan: free
     # The image CMD has no --allow-unconfigured, so a fresh ephemeral
