@@ -78,7 +78,7 @@ async function choose(page: Page, kind: string) {
   const pending = page.waitForEvent("filechooser");
   await item.press("Enter");
   const chooser = await pending;
-  const input = await chooser.element();
+  const input = chooser.element();
   expect(chooser.isMultiple()).toBe(kind !== "camera");
   expect(await input.getAttribute("class")).toBe(`agent-chat__${kind}-input`);
   expect(await input.getAttribute("capture")).toBe(kind === "camera" ? "environment" : null);
