@@ -1,4 +1,3 @@
-// Message lifecycle tests cover diagnostic logging for queued and processed messages.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const diagnosticMocks = vi.hoisted(() => ({
@@ -7,72 +6,58 @@ const diagnosticMocks = vi.hoisted(() => ({
   logSessionStateChange: vi.fn(),
 }));
 
-vi.mock("./diagnostic.js", () => ({
-  logMessageProcessed: diagnosticMocks.logMessageProcessed,
-  logMessageQueued: diagnosticMocks.logMessageQueued,
-  logSessionStateChange: diagnosticMocks.logSessionStateChange,
-}));
+vi.mock("./diagnostic.js", () => diagnosticMocks);
 
 import { createDiagnosticMessageLifecycle } from "./message-lifecycle.js";
 
+function expectProcessed(event: Record<string, unknown>) {
+  expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith({
+    chatId: undefined,
+    messageId: undefined,
+    sessionId: undefined,
+    sessionKey: undefined,
+    reason: undefined,
+    error: undefined,
+    ...event,
+  });
+}
+
 describe("createDiagnosticMessageLifecycle", () => {
   beforeEach(() => {
-    diagnosticMocks.logMessageProcessed.mockReset();
-    diagnosticMocks.logMessageQueued.mockReset();
-    diagnosticMocks.logSessionStateChange.mockReset();
+    for (const mock of Object.values(diagnosticMocks)) {
+      mock.mockReset();
+    }
   });
 
   it("emits queued, state, and processed events through one lifecycle", () => {
+    const initialRef = { sessionId: "initial-session", sessionKey: "cron:job" };
+    const finalRef = { ...initialRef, sessionId: "final-session" };
     const lifecycle = createDiagnosticMessageLifecycle({
       enabled: true,
       channel: "cron",
       source: "cron-isolated",
-      sessionId: "initial-session",
-      sessionKey: "cron:job",
+      ...initialRef,
       trackSessionState: true,
     });
 
     lifecycle.markProcessing();
-    lifecycle.markIdle(undefined, { sessionId: "final-session" });
-    lifecycle.markProcessed("completed", {
-      sessionId: "final-session",
-      durationMs: 42,
-    });
+    lifecycle.markIdle(undefined, finalRef);
+    lifecycle.markProcessed("completed", { ...finalRef, durationMs: 42 });
 
     expect(diagnosticMocks.logMessageQueued).toHaveBeenCalledWith({
-      sessionId: "initial-session",
-      sessionKey: "cron:job",
+      ...initialRef,
       channel: "cron",
       source: "cron-isolated",
     });
     expect(diagnosticMocks.logSessionStateChange.mock.calls).toEqual([
-      [
-        {
-          sessionId: "initial-session",
-          sessionKey: "cron:job",
-          state: "processing",
-          reason: undefined,
-        },
-      ],
-      [
-        {
-          sessionId: "final-session",
-          sessionKey: "cron:job",
-          state: "idle",
-          reason: undefined,
-        },
-      ],
+      [{ ...initialRef, state: "processing", reason: undefined }],
+      [{ ...finalRef, state: "idle", reason: undefined }],
     ]);
-    expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith({
+    expectProcessed({
       channel: "cron",
-      chatId: undefined,
-      messageId: undefined,
-      sessionId: "final-session",
-      sessionKey: "cron:job",
+      ...finalRef,
       durationMs: 42,
       outcome: "completed",
-      reason: undefined,
-      error: undefined,
     });
   });
 
@@ -88,23 +73,17 @@ describe("createDiagnosticMessageLifecycle", () => {
 
     lifecycle.markProcessing();
     lifecycle.markIdle("message_completed");
-    lifecycle.markProcessed("skipped", {
-      durationMs: 7,
-      reason: "duplicate",
-    });
+    lifecycle.markProcessed("skipped", { durationMs: 7, reason: "duplicate" });
 
     expect(diagnosticMocks.logMessageQueued).not.toHaveBeenCalled();
     expect(diagnosticMocks.logSessionStateChange).not.toHaveBeenCalled();
-    expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith({
+    expectProcessed({
       channel: "whatsapp",
       chatId: "chat-1",
       messageId: "msg-1",
-      sessionId: undefined,
-      sessionKey: undefined,
       durationMs: 7,
       outcome: "skipped",
       reason: "duplicate",
-      error: undefined,
     });
   });
 
