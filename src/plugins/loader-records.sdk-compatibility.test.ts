@@ -12,6 +12,9 @@ import { createEmptyPluginRegistry } from "./registry-empty.js";
 
 const tempDirs = createTempDirTracker();
 afterEach(() => tempDirs.cleanup());
+// Native Node avoids the host test process's SDK aliases.
+const importProbe =
+  'try { await import(process.argv[1]); console.log("null"); } catch (error) { console.log(JSON.stringify({name:error.name,message:error.message,code:error.code})); }';
 
 function write(target: string, content: string | object) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -19,39 +22,20 @@ function write(target: string, content: string | object) {
 }
 
 it.each([
-  { name: "missing export", nestedSdk: false, wrapped: false },
-  { name: "wrapped missing export", nestedSdk: false, wrapped: true },
-  { name: "nested SDK", nestedSdk: true, wrapped: false },
-  { name: "wrapped nested SDK", nestedSdk: true, wrapped: true },
-  {
-    name: "channel setup classification",
-    nestedSdk: true,
-    wrapped: false,
-    diagnosticCode: "channel-setup-failure" as const,
-  },
-  {
-    name: "plugin id requiring quoting",
-    nestedSdk: false,
-    wrapped: false,
-    pluginId: "custom plugin",
-  },
-])("diagnoses $name", ({ nestedSdk, wrapped, diagnosticCode, pluginId }) => {
+  ["missing export", false, false],
+  ["wrapped missing export", false, true],
+  ["nested SDK", true, false],
+  ["wrapped nested SDK", true, true],
+  ["channel setup classification", true, false, "channel-setup-failure"],
+  ["plugin id requiring quoting", false, false, undefined, "custom plugin"],
+] as const)("diagnoses %s", (_name, nestedSdk, wrapped, diagnosticCode, pluginId) => {
   const project = tempDirs.make("openclaw-sdk-skew-");
   const id = pluginId ?? (nestedSdk ? "third-party-fixture" : "whatsapp");
   const packageName = nestedSdk ? "@fixture/third-party" : "@openclaw/whatsapp";
   const rootDir = path.join(project, "node_modules", packageName);
   const sdkRoot = path.join(nestedSdk ? rootDir : project, "node_modules", "openclaw");
   const seam = `openclaw/plugin-sdk/${nestedSdk ? "channel-runtime" : "agent-harness-runtime"}`;
-  write(path.join(project, "package.json"), { dependencies: { [packageName]: "2026.7.1" } });
-  write(path.join(rootDir, "package.json"), {
-    name: packageName,
-    version: "2026.7.1",
-    type: "module",
-  });
   write(path.join(sdkRoot, "package.json"), {
-    name: "openclaw",
-    version: nestedSdk ? "2026.7.1" : VERSION,
-    type: "module",
     exports: nestedSdk ? {} : { "./plugin-sdk/agent-harness-runtime": "./runtime.mjs" },
   });
   write(path.join(sdkRoot, "runtime.mjs"), "export const available = true;");
@@ -62,33 +46,16 @@ it.each([
       ? `import ${JSON.stringify(seam)};`
       : `import { MISSING_FIXTURE_EXPORT } from ${JSON.stringify(seam)}; export default MISSING_FIXTURE_EXPORT;`,
   );
-  // Native Node supplies the real error shape, without the host test process's SDK aliases.
-  const result = JSON.parse(
-    execFileSync(
-      resolveTestNodeExecPath(),
-      [
-        "--input-type=module",
-        "-e",
-        'try { await import(process.argv[1]); console.log("null"); } catch (error) { console.log(JSON.stringify({name:error.name,message:error.message,code:error.code})); }',
-        pathToFileURL(source).href,
-      ],
-      { encoding: "utf8" },
-    ),
-  );
+  const args = ["--input-type=module", "-e", importProbe, pathToFileURL(source).href];
+  const result = JSON.parse(execFileSync(resolveTestNodeExecPath(), args, { encoding: "utf8" }));
   expect(result).toMatchObject(
     nestedSdk ? { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" } : { name: "SyntaxError" },
   );
-  const nativeError = Object.assign(new Error(result.message), {
-    name: result.name,
-    code: result.code,
-  });
-  const error = wrapped ? new Error("native import failed", { cause: nativeError }) : nativeError;
+  const nativeError = Object.assign(new Error(result.message), result);
   const record = createPluginRecord({
     id,
-    packageName,
     source,
     rootDir,
-    packageVersion: "2026.7.1",
     builtWithOpenClawVersion: "2026.7.1",
     origin: "global",
     enabled: true,
@@ -103,9 +70,7 @@ it.each([
     seenIds: new Map(),
     phase: "load",
     diagnosticCode,
-    error,
-    logPrefix: "",
-    diagnosticMessagePrefix: "",
+    error: wrapped ? new Error("native import failed", { cause: nativeError }) : nativeError,
   });
   expect(logger.error).toHaveBeenCalledTimes(1);
   expect(registry.diagnostics).toHaveLength(1);
@@ -130,9 +95,8 @@ it.each([
     registry.diagnostics[0]?.message,
     logger.error.mock.calls[0]?.[0],
   ]) {
-    expect(text).toContain(id);
-    expect(text).toContain(seam);
-    expect(text).toContain(VERSION);
-    expect(text).toContain(action);
+    for (const part of [id, seam, VERSION, action]) {
+      expect(text).toContain(part);
+    }
   }
 });

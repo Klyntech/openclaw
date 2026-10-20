@@ -5,6 +5,12 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { loadPluginManifest } from "./manifest.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const decision = (id: string, name: string, fields: Record<string, unknown> = {}) => ({
+  provider: "fixture",
+  id,
+  name,
+  ...fields,
+});
 
 function loadModels(fields: Record<string, unknown>) {
   const root = tempDirs.make("manifest-decision-models-");
@@ -39,25 +45,13 @@ it("discovers only decision models owned by the manifest without executing its r
   };
   const manifest = loadModels({
     decisionModels: [
-      {
-        provider: " fixture ",
-        id: " fast ",
-        name: " Fast decisions ",
-        capabilities,
-      },
-      { provider: "fixture", id: "fast", name: "Duplicate" },
-      { provider: "other", id: "foreign", name: "Unowned" },
+      decision(" fast ", " Fast decisions ", { provider: " fixture ", capabilities }),
+      decision("fast", "Duplicate"),
+      decision("foreign", "Unowned", { provider: "other" }),
       { provider: "fixture", id: "missing-name" },
     ],
   });
-  expect(manifest.decisionModels).toEqual([
-    {
-      provider: "fixture",
-      id: "fast",
-      name: "Fast decisions",
-      capabilities,
-    },
-  ]);
+  expect(manifest.decisionModels).toEqual([decision("fast", "Fast decisions", { capabilities })]);
   expect(manifest.providers ?? []).toEqual([]);
   expect(manifest.modelCatalog?.providers?.fixture?.models).toEqual([
     {
@@ -84,10 +78,7 @@ it("discovers only decision models owned by the manifest without executing its r
 it("bounds provider metadata before discovery can expose it to tool diagnostics", () => {
   const manifest = loadModels({
     decisionModels: [
-      {
-        provider: "fixture",
-        id: "bounded",
-        name: "Bounded",
+      decision("bounded", "Bounded", {
         capabilities: {
           questionTypes: ["boolean", "boolean"],
           maxQuestions: -1,
@@ -98,37 +89,30 @@ it("bounds provider metadata before discovery can expose it to tool diagnostics"
           inputTokenScope: "private-provider-diagnostic",
           requiresBooleanCriteria: "true",
         },
-      },
-      {
-        provider: "fixture",
-        id: "invalid",
-        name: "Invalid",
+      }),
+      decision("invalid", "Invalid", {
         capabilities: { questionTypes: ["private-provider-diagnostic"] },
-      },
+      }),
     ],
   });
   expect(manifest.decisionModels).toEqual([
-    {
-      provider: "fixture",
-      id: "bounded",
-      name: "Bounded",
-      capabilities: { questionTypes: ["boolean"] },
-    },
-    { provider: "fixture", id: "invalid", name: "Invalid" },
+    decision("bounded", "Bounded", { capabilities: { questionTypes: ["boolean"] } }),
+    decision("invalid", "Invalid"),
   ]);
 });
 
 it("keeps explicit canonical identities authoritative over V1 input, including rejected rows", () => {
+  const native = {
+    id: "native",
+    name: "Native",
+    inference: { chat: false, decision: { protocol: "native", input: ["image"] } },
+  };
   const manifest = loadModels({
     modelCatalog: {
       providers: {
         fixture: {
           models: [
-            {
-              id: "native",
-              name: "Native",
-              inference: { chat: false, decision: { protocol: "native", input: ["image"] } },
-            },
+            native,
             {
               id: "rejected",
               name: "Rejected",
@@ -139,15 +123,9 @@ it("keeps explicit canonical identities authoritative over V1 input, including r
       },
     },
     decisionModels: [
-      { provider: "fixture", id: "native", name: "Legacy duplicate" },
-      { provider: "fixture", id: "rejected", name: "Must not resurrect" },
+      decision("native", "Legacy duplicate"),
+      decision("rejected", "Must not resurrect"),
     ],
   });
-  expect(manifest.modelCatalog?.providers?.fixture?.models).toEqual([
-    {
-      id: "native",
-      name: "Native",
-      inference: { chat: false, decision: { protocol: "native", input: ["image"] } },
-    },
-  ]);
+  expect(manifest.modelCatalog?.providers?.fixture?.models).toEqual([native]);
 });

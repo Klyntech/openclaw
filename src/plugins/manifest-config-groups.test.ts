@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Value } from "typebox/value";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import {
   ConfigSchemaLookupResultSchema,
   ConfigSchemaResponseSchema,
@@ -14,6 +14,7 @@ import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fi
 
 const roots: string[] = [];
 const configPath = "plugins.entries.grouped-plugin.config";
+const fieldNames = ["enabled", "storage", "timeout"];
 const configSchema = {
   type: "object",
   additionalProperties: false,
@@ -46,7 +47,12 @@ function schemaFor(configGroups: unknown, uiHints?: unknown) {
     ],
   });
   expect(registry.plugins).toHaveLength(1);
-  return buildConfigSchemaCore({ plugins: collectPluginSchemaMetadataCore(registry) });
+  const response = buildConfigSchemaCore({ plugins: collectPluginSchemaMetadataCore(registry) });
+  const lookup = lookupConfigSchema(response, configPath);
+  expect(Value.Check(ConfigSchemaResponseSchema, response)).toBe(true);
+  expect(Value.Check(ConfigSchemaLookupResultSchema, lookup)).toBe(true);
+  expect(lookupConfigSchema(response, `${configPath}.storage.path`)?.schema.type).toBe("string");
+  return { response, lookup };
 }
 
 afterEach(() => {
@@ -54,67 +60,54 @@ afterEach(() => {
   cleanupTrackedTempDirs(roots);
 });
 
-describe("authored plugin config groups", () => {
-  it.each([true, false, "yes"])("normalizes and publishes multiline hint %j", (multiline) => {
-    const response = schemaFor(groups, { "storage.path": { multiline } });
-    const lookup = lookupConfigSchema(response, `${configPath}.storage.path`);
-    expect(lookup?.hint?.multiline).toBe(typeof multiline === "boolean" ? multiline : undefined);
-    expect(Value.Check(ConfigSchemaResponseSchema, response)).toBe(true);
-    expect(Value.Check(ConfigSchemaLookupResultSchema, lookup)).toBe(true);
+it.each([true, false, "yes"])("normalizes and publishes multiline hint %j", (multiline) => {
+  const { response } = schemaFor(groups, { "storage.path": { multiline } });
+  const lookup = lookupConfigSchema(response, `${configPath}.storage.path`);
+  expect(lookup?.hint?.multiline).toBe(typeof multiline === "boolean" ? multiline : undefined);
+  expect(Value.Check(ConfigSchemaLookupResultSchema, lookup)).toBe(true);
+});
+
+it("carries groups through discovery into schema and lookup without hiding ungrouped fields", () => {
+  const { response, lookup } = schemaFor(groups);
+
+  expect(response.uiHints[configPath]).toMatchObject({ groups });
+  expect(lookup).toMatchObject({
+    hint: { groups },
+    children: expect.arrayContaining([
+      expect.objectContaining({ key: "enabled" }),
+      expect.objectContaining({ key: "storage", hasChildren: true }),
+      expect.objectContaining({ key: "timeout" }),
+    ]),
   });
+});
 
-  it("carries groups through discovery into schema and lookup without hiding ungrouped fields", () => {
-    const response = schemaFor(groups);
-    const lookup = lookupConfigSchema(response, configPath);
+it("refreshes cached schema presentation when only authored grouping changes", () => {
+  const { response: first } = schemaFor(groups);
+  const renamed = [{ ...groups[0], title: "Data storage" }, groups[1]];
+  const { response: next } = schemaFor(renamed);
 
-    expect(response.uiHints[configPath]).toMatchObject({ groups });
-    expect(lookup).toMatchObject({
-      hint: { groups },
-      children: expect.arrayContaining([
-        expect.objectContaining({ key: "enabled" }),
-        expect.objectContaining({ key: "storage", hasChildren: true }),
-        expect.objectContaining({ key: "timeout" }),
-      ]),
-    });
-    expect(lookupConfigSchema(response, `${configPath}.storage.path`)?.schema.type).toBe("string");
-    expect(Value.Check(ConfigSchemaResponseSchema, response)).toBe(true);
-    expect(Value.Check(ConfigSchemaLookupResultSchema, lookup)).toBe(true);
-  });
+  expect(first.uiHints[configPath]).toMatchObject({ groups });
+  expect(next.uiHints[configPath]).toMatchObject({ groups: renamed });
+  expect(next.schema).toEqual(first.schema);
+});
 
-  it("refreshes cached schema presentation when only authored grouping changes", () => {
-    const first = schemaFor(groups);
-    const renamed = [{ ...groups[0], title: "Data storage" }, groups[1]];
-    const next = schemaFor(renamed);
+it.each([
+  { label: "missing", value: undefined },
+  { label: "empty", value: [] },
+  { label: "non-array", value: {} },
+  { label: "missing title", value: [{ id: "general", properties: ["enabled"] }] },
+  { label: "empty title", value: [{ ...groups[0], title: " " }] },
+  { label: "empty id", value: [{ ...groups[0], id: "" }] },
+  { label: "non-integer order", value: [{ ...groups[0], order: 1.5 }] },
+  { label: "empty properties", value: [{ ...groups[0], properties: [] }] },
+  { label: "duplicate id", value: [groups[0], { ...groups[1], id: "storage" }] },
+  { label: "duplicate property", value: [groups[0], { ...groups[1], properties: ["storage"] }] },
+  { label: "repeated property", value: [{ ...groups[0], properties: ["storage", "storage"] }] },
+  { label: "unknown property", value: [{ ...groups[0], properties: ["unknown"] }] },
+  { label: "nested path", value: [{ ...groups[0], properties: ["storage.path"] }] },
+])("keeps the plugin and every config field available with $label grouping", ({ value }) => {
+  const { response, lookup } = schemaFor(value);
 
-    expect(first.uiHints[configPath]).toMatchObject({ groups });
-    expect(next.uiHints[configPath]).toMatchObject({ groups: renamed });
-    expect(next.schema).toEqual(first.schema);
-  });
-
-  it.each([
-    { label: "missing", value: undefined },
-    { label: "empty", value: [] },
-    { label: "non-array", value: {} },
-    { label: "missing title", value: [{ id: "general", properties: ["enabled"] }] },
-    { label: "empty title", value: [{ ...groups[0], title: " " }] },
-    { label: "empty id", value: [{ ...groups[0], id: "" }] },
-    { label: "non-integer order", value: [{ ...groups[0], order: 1.5 }] },
-    { label: "empty properties", value: [{ ...groups[0], properties: [] }] },
-    { label: "duplicate id", value: [groups[0], { ...groups[1], id: "storage" }] },
-    { label: "duplicate property", value: [groups[0], { ...groups[1], properties: ["storage"] }] },
-    { label: "repeated property", value: [{ ...groups[0], properties: ["storage", "storage"] }] },
-    { label: "unknown property", value: [{ ...groups[0], properties: ["unknown"] }] },
-    { label: "nested path", value: [{ ...groups[0], properties: ["storage.path"] }] },
-  ])("keeps the plugin and every config field available with $label grouping", ({ value }) => {
-    const response = schemaFor(value);
-    const lookup = lookupConfigSchema(response, configPath);
-
-    expect(response.uiHints[configPath]).not.toHaveProperty("groups");
-    expect(lookup?.children.map((child) => child.key).toSorted()).toEqual([
-      "enabled",
-      "storage",
-      "timeout",
-    ]);
-    expect(lookupConfigSchema(response, `${configPath}.storage.path`)?.schema.type).toBe("string");
-  });
+  expect(response.uiHints[configPath]).not.toHaveProperty("groups");
+  expect(lookup?.children.map((child) => child.key).toSorted()).toEqual(fieldNames);
 });

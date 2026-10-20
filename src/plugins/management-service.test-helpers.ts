@@ -1,6 +1,17 @@
 import type { PluginCategorySlug } from "../../packages/plugin-package-contract/src/index.js";
 import type { PluginManifestRecord } from "./manifest-registry.js";
 
+export function pluginConfig(
+  states: Record<string, boolean>,
+  policy: { allow?: string[]; deny?: string[]; load?: { paths: string[] } } = {},
+) {
+  const entries: Record<string, { enabled: boolean }> = {};
+  for (const [id, enabled] of Object.entries(states)) {
+    entries[id] = { enabled };
+  }
+  return { plugins: { ...policy, entries } };
+}
+
 export function configSnapshot(config: Record<string, unknown> = {}) {
   return {
     snapshot: {
@@ -22,7 +33,7 @@ export function metadataSnapshot(params: {
   enabled: boolean;
   id?: string;
   name?: string;
-  origin?: "bundled" | "global";
+  origin?: "bundled" | "global" | "config";
   installRecord?: Record<string, unknown>;
   packageBuild?: { bundledDist?: boolean };
   packageDependencies?: Record<string, string>;
