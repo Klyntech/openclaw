@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished } from "vitest";
 import type { ChannelGatewayContextV2 } from "../channels/plugins/types.adapters.js";
 import { createAuthRateLimiter } from "../plugin-sdk/webhook-ingress.js";
 import { registerPluginHttpRoute } from "../plugins/http-registry.js";
@@ -50,25 +50,21 @@ it.each([true, false])(
     const clock = createGatewaySchedulerClock();
     const gatewayScheduler = createTestGatewayScheduler(clock.clock);
     const started = createDeferredCore<ChannelGatewayContextV2<TestAccount>>();
-    const observations: Array<{
-      liveInstance: boolean;
-      gateway: boolean;
-      request: boolean;
-      operator: boolean;
-    }> = [];
+    const observations: Array<
+      [instance: boolean, gateway: boolean, request: boolean, operator: boolean]
+    > = [];
     const observe = async () => {
       await Promise.resolve();
       if (!gatewayBound) {
         const limiter = createAuthRateLimiter();
         limiter.dispose();
       }
-      observations.push({
-        liveInstance:
-          pluginInstanceInvocation.getStore()?.instance === instance && instance.hasActiveCall,
-        gateway: getInProcessGatewayRequestContext() === context,
-        request: getPluginRuntimeGatewayRequestScope()?.client !== undefined,
-        operator: readOperatorToolGatewayAuthority() !== undefined,
-      });
+      observations.push([
+        pluginInstanceInvocation.getStore()?.instance === instance && instance.hasActiveCall,
+        getInProcessGatewayRequestContext() === context,
+        getPluginRuntimeGatewayRequestScope()?.client !== undefined,
+        readOperatorToolGatewayAuthority() !== undefined,
+      ]);
       registerPluginHttpRoute({
         path: `/scheduled-account/${observations.length}`,
         auth: "plugin",
@@ -96,6 +92,11 @@ it.each([true, false])(
       scheduler: gatewayScheduler,
       getPluginRegistry: () => registry,
     });
+    onTestFinished(async () => {
+      await manager.stopChannel("discord");
+      await gatewayScheduler.stop();
+      await instance.dispose();
+    });
     const runFromRequest = async <T>(run: () => T | Promise<T>): Promise<T> => {
       const caller = new AbortController();
       try {
@@ -120,37 +121,30 @@ it.each([true, false])(
         caller.abort(new Error("Caller completed"));
       }
     };
-    try {
-      await runFromRequest(async () => {
-        await manager.startChannel("discord");
-        await started.promise;
-      });
-      const account = await started.promise;
-      await clock.advanceBy(1);
-      await runFromRequest(() =>
-        instance.run(() => {
-          account.scheduler.schedule({ id: "later-request", delayMs: 1, run: observe });
-        }),
-      );
-      await clock.advanceBy(1);
-      expect(observations).toEqual([
-        { liveInstance: true, gateway: gatewayBound, request: false, operator: false },
-        { liveInstance: true, gateway: gatewayBound, request: false, operator: false },
-      ]);
-      expect(registry.httpRoutes.map((route) => route.path)).toEqual([
-        "/scheduled-account/1",
-        "/scheduled-account/2",
-      ]);
-      account.scheduler.schedule({ id: "retired", delayMs: 1, run: observe });
-      await manager.stopChannel("discord");
-      await clock.advanceBy(1);
-      expect(observations).toHaveLength(2);
-      expect(account.scheduler.signal.aborted).toBe(true);
-      expect(registry.httpRoutes).toHaveLength(0);
-    } finally {
-      await manager.stopChannel("discord");
-      await gatewayScheduler.stop();
-      await instance.dispose();
-    }
+    const account = await runFromRequest(async () => {
+      await manager.startChannel("discord");
+      return started.promise;
+    });
+    await clock.advanceBy(1);
+    await runFromRequest(() =>
+      instance.run(() =>
+        account.scheduler.schedule({ id: "later-request", delayMs: 1, run: observe }),
+      ),
+    );
+    await clock.advanceBy(1);
+    expect(observations).toEqual([
+      [true, gatewayBound, false, false],
+      [true, gatewayBound, false, false],
+    ]);
+    expect(registry.httpRoutes.map((route) => route.path)).toEqual([
+      "/scheduled-account/1",
+      "/scheduled-account/2",
+    ]);
+    account.scheduler.schedule({ id: "retired", delayMs: 1, run: observe });
+    await manager.stopChannel("discord");
+    await clock.advanceBy(1);
+    expect(observations).toHaveLength(2);
+    expect(account.scheduler.signal.aborted).toBe(true);
+    expect(registry.httpRoutes).toHaveLength(0);
   },
 );

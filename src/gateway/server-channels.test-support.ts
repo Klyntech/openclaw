@@ -13,6 +13,8 @@ import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-cloc
 import { evaluateChannelHealth } from "./channel-health-policy.js";
 import { createChannelManager } from "./server-channels.js";
 
+type TestPlugin = ChannelPlugin<TestAccount, unknown, unknown, 1 | 2>;
+
 export type TestAccount = {
   enabled?: boolean;
   configured?: boolean;
@@ -70,13 +72,6 @@ export function createTestPlugin(params?: {
         configured: resolved.configured !== false,
       }));
   }
-  const gateway: ChannelGatewayAdapterV2<TestAccount> = { apiVersion: 2 };
-  if (params?.startAccount) {
-    gateway.startAccount = params.startAccount;
-  }
-  if (params?.stopAccount) {
-    gateway.stopAccount = params.stopAccount;
-  }
   return {
     id,
     meta: {
@@ -89,7 +84,11 @@ export function createTestPlugin(params?: {
     },
     capabilities: { chatTypes: ["direct"] },
     config,
-    gateway,
+    gateway: {
+      apiVersion: 2,
+      ...(params?.startAccount ? { startAccount: params.startAccount } : {}),
+      ...(params?.stopAccount ? { stopAccount: params.stopAccount } : {}),
+    },
   };
 }
 
@@ -107,9 +106,9 @@ export async function flushMicrotasks(times = 8): Promise<void> {
 
 export function createTestChannelRegistry(
   ...plugins: Array<
-    | ChannelPlugin<TestAccount, unknown, unknown, 1 | 2>
+    | TestPlugin
     | {
-        plugin: ChannelPlugin<TestAccount, unknown, unknown, 1 | 2>;
+        plugin: TestPlugin;
         origin: string;
         resolveChannelRuntime?: () => PluginRuntime["channel"];
       }
@@ -117,15 +116,11 @@ export function createTestChannelRegistry(
 ) {
   const registry = createEmptyPluginRegistry();
   for (const candidate of plugins) {
-    const plugin = "plugin" in candidate ? candidate.plugin : candidate;
+    const entry = "plugin" in candidate ? candidate : { plugin: candidate };
     registry.channels.push({
-      pluginId: plugin.id,
-      ...("origin" in candidate ? { origin: candidate.origin as never } : {}),
-      ...(typeof candidate === "object" && "resolveChannelRuntime" in candidate
-        ? { resolveChannelRuntime: candidate.resolveChannelRuntime }
-        : {}),
+      pluginId: entry.plugin.id,
       source: "test",
-      plugin,
+      ...entry,
     } as PluginRegistry["channels"][number]);
   }
   return registry;
@@ -138,7 +133,7 @@ export function createTestChannelManager(
 ) {
   const { channelIds = ["discord"], ...overrides } = options;
   const log = createSubsystemLogger("gateway/server-channels-test");
-  const manager = createChannelManager({
+  return createChannelManager({
     scheduler: createTestGatewayScheduler(),
     getRuntimeConfig: () => ({}),
     getPluginRegistry: requireActivePluginChannelRegistry,
@@ -146,5 +141,4 @@ export function createTestChannelManager(
     channelRuntimeEnvs: Object.fromEntries(channelIds.map((id) => [id, runtimeForLogger(log)])),
     ...overrides,
   });
-  return manager;
 }

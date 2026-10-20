@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it, onTestFinished } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { withGatewayToolCallerIdentity } from "../agents/tools/gateway-caller-context.js";
 import type { ChannelGatewayContext } from "../channels/plugins/types.adapters.js";
@@ -20,18 +20,6 @@ import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispa
 import { createContext } from "./server-plugin-in-process-dispatch.test-support.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
 
-let previousRegistry: ReturnType<typeof getActivePluginRegistry>;
-
-beforeEach(() => {
-  resetGatewayWorkAdmission();
-  previousRegistry = getActivePluginRegistry();
-});
-
-afterEach(() => {
-  resetGatewayWorkAdmission();
-  setActivePluginRegistry(previousRegistry ?? createTestChannelRegistry());
-});
-
 function gatewayContext(gateway: string) {
   const context = createContext();
   context.getGatewayMethodRegistry = () =>
@@ -49,26 +37,26 @@ function gatewayContext(gateway: string) {
 it.each(["operator client", "agent run", "operator tool"] as const)(
   "keeps channel requests bound to their Gateway after the initiating %s ends",
   async (caller) => {
+    const previousRegistry = getActivePluginRegistry();
+    resetGatewayWorkAdmission();
+    onTestFinished(() => {
+      resetGatewayWorkAdmission();
+      setActivePluginRegistry(previousRegistry ?? createTestChannelRegistry());
+    });
     const continueChannelRequest = createDeferred();
     const observedGateway = createDeferred<{ gateway: string }>();
     const ownerContext = gatewayContext("channel-owner");
     const callerContext = gatewayContext("starting-client");
     const startAccount = async ({ abortSignal }: ChannelGatewayContext<TestAccount>) => {
       await continueChannelRequest.promise;
-      try {
-        observedGateway.resolve(
-          await dispatchGatewayMethodInProcess<{ gateway: string }>(
-            "health",
-            {},
-            {
-              syntheticScopes: ["operator.read"],
-              operatorRoleActor: { kind: "system" },
-            },
-          ),
-        );
-      } catch (error) {
-        observedGateway.reject(error);
-      }
+      await dispatchGatewayMethodInProcess<{ gateway: string }>(
+        "health",
+        {},
+        {
+          syntheticScopes: ["operator.read"],
+          operatorRoleActor: { kind: "system" },
+        },
+      ).then(observedGateway.resolve, observedGateway.reject);
       await waitForAbort(abortSignal);
     };
     setActivePluginRegistry(createTestChannelRegistry(createTestPlugin({ startAccount })));
