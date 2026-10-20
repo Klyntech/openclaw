@@ -513,21 +513,14 @@ suite.define(() => {
           .toBeGreaterThan(0);
         expect(await image.getAttribute("src")).toMatch(/^blob:/);
         expect(await image.isVisible()).toBe(true);
+        const browser = await readBrowserResponses(page);
+        expect(browser).toMatchObject([{ status }, { status: 200, cancelCount: 0, blobReads: 1 }]);
+        const success = browser[1];
+        expect(success?.blobBytes).toBeGreaterThan(0);
         expect(readServerResponses(caseName)).toMatchObject([
           { status, credential: "stale" },
-          { status: 200, credential: "valid" },
+          { id: success?.id, status: 200, credential: "valid", finished: true, endedAtClose: true },
         ]);
-        const browser = await readBrowserResponses(page);
-        expect(browser.map((response) => response.status)).toEqual([status, 200]);
-        const success = browser[1];
-        expect(success).toMatchObject({ cancelCount: 0, blobReads: 1 });
-        expect(success?.blobBytes).toBeGreaterThan(0);
-        expect(readServerResponses(caseName)[1]).toMatchObject({
-          id: success?.id,
-          status: 200,
-          finished: true,
-          endedAtClose: true,
-        });
       });
     },
   );

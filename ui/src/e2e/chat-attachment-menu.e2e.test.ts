@@ -14,13 +14,80 @@ const suite = createControlUiE2eSuite({
   browserLaunchOptions: { args: ["--use-fake-device-for-media-stream"] },
 });
 
+type ChatFixture = {
+  route: string;
+  browser?: string;
+  preview?: "insecure" | "unsupported" | "permission-denied" | "record-denial";
+  geometry?: boolean;
+  cameraPermission?: boolean;
+};
+
+function withChat(
+  options: ChatFixture,
+  run: (page: Page, choosers: () => number) => Promise<void>,
+) {
+  const identity = options.browser ? attachmentBrowser(options.browser) : undefined;
+  return suite.withPage(
+    {
+      viewport: options.cameraPermission
+        ? { width: 1280, height: 900 }
+        : { width: 390, height: 844 },
+      ...(identity ? { userAgent: identity.userAgent, hasTouch: identity.touch > 0 } : {}),
+      ...(options.cameraPermission ? { permissions: ["camera"] } : {}),
+    },
+    async ({ page }) => {
+      if (identity) {
+        await installAttachmentBrowserIdentity(page, identity);
+      }
+      if (options.geometry) {
+        await capturePickerGeometry(page);
+      }
+      if (options.preview) {
+        await page.addInitScript((kind) => {
+          if (kind === "permission-denied" || kind === "record-denial") {
+            navigator.mediaDevices.getUserMedia = async () => {
+              if (kind === "record-denial") {
+                document.documentElement.dataset.cameraRequested = "true";
+              }
+              throw new DOMException("Preview permission denied", "NotAllowedError");
+            };
+          } else {
+            Object.defineProperty(
+              kind === "insecure" ? window : navigator,
+              kind === "insecure" ? "isSecureContext" : "mediaDevices",
+              { configurable: true, value: kind === "insecure" ? false : undefined },
+            );
+          }
+        }, options.preview);
+      }
+      await installMockGateway(page);
+      let chooserCount = 0;
+      page.on("filechooser", () => {
+        chooserCount += 1;
+      });
+      await page.goto(suite.server.baseUrl + options.route);
+      await run(page, () => chooserCount);
+    },
+  );
+}
+
 async function choose(page: Page, kind: string) {
   await page.getByRole("button", { name: "Add attachment", exact: true }).press("Enter");
   const item = attachmentOption(page, kind);
   await item.waitFor({ state: "visible" });
   const pending = page.waitForEvent("filechooser");
   await item.press("Enter");
-  return pending;
+  const chooser = await pending;
+  const input = await chooser.element();
+  expect(chooser.isMultiple()).toBe(kind !== "camera");
+  expect(await input.getAttribute("class")).toBe(`agent-chat__${kind}-input`);
+  expect(await input.getAttribute("capture")).toBe(kind === "camera" ? "environment" : null);
+  expect(await input.getAttribute("accept")).toBe(kind === "file" ? null : "image/*");
+  return chooser;
+}
+
+function cameraButton(page: Page, name: string) {
+  return page.locator("openclaw-chat-camera-capture").getByRole("button", { name, exact: true });
 }
 
 async function capturePickerGeometry(page: Page) {
@@ -69,25 +136,11 @@ suite.define(() => {
       ["iPhone Safari", "iOS Chrome"].map((name) => ({ route, name })),
     ),
   )("anchors $name upload and fallback pickers in $route", async ({ route, name }) => {
-    const fixture = attachmentBrowser(name);
     const cameraFallback = name === "iOS Chrome";
-    await suite.withPage(
-      { userAgent: fixture.userAgent, hasTouch: true, viewport: { width: 390, height: 844 } },
-      async ({ page }) => {
-        await installAttachmentBrowserIdentity(page, fixture);
-        await capturePickerGeometry(page);
-        if (cameraFallback) {
-          await page.addInitScript(() => {
-            Object.defineProperty(navigator, "mediaDevices", {
-              configurable: true,
-              value: undefined,
-            });
-          });
-        }
-        await installMockGateway(page, { historyMessages: [] });
-        await page.goto(suite.server.baseUrl + route);
+    await withChat(
+      { route, browser: name, geometry: true, preview: cameraFallback ? "unsupported" : undefined },
+      async (page) => {
         const trigger = page.getByRole("button", { name: "Add attachment", exact: true });
-        const camera = page.locator("openclaw-chat-camera-capture");
         const widths: [number, number][] = [
           [390, 844],
           [320, 568],
@@ -107,12 +160,7 @@ suite.define(() => {
           const pending = page.waitForEvent("filechooser");
           if (cameraFallback) {
             await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
-            await camera
-              .getByRole("button", {
-                name: width === 932 ? "Use device camera" : "Upload photo",
-                exact: true,
-              })
-              .click();
+            await cameraButton(page, width === 932 ? "Use device camera" : "Upload photo").click();
           } else {
             await attachmentOption(page, "file").click();
           }
@@ -131,39 +179,15 @@ suite.define(() => {
     { route: "chat", availability: "insecure" },
     { route: "new", availability: "unsupported" },
     { route: "chat", availability: "permission-denied" },
-  ])(
+  ] as const)(
     "offers explicit native capture in $route when preview is $availability",
-    async ({ route, availability }) => {
-      await suite.withPage({ viewport: { width: 390, height: 844 } }, async ({ page }) => {
-        await page.addInitScript((kind) => {
-          if (kind === "insecure") {
-            Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
-          } else if (kind === "permission-denied") {
-            navigator.mediaDevices.getUserMedia = async () => {
-              throw new DOMException("Preview permission denied", "NotAllowedError");
-            };
-          } else {
-            Object.defineProperty(navigator, "mediaDevices", {
-              configurable: true,
-              value: undefined,
-            });
-          }
-        }, availability);
-        await installMockGateway(page, { historyMessages: [] });
-        let chooserCount = 0;
-        page.on("filechooser", () => {
-          chooserCount += 1;
-        });
-        await page.goto(suite.server.baseUrl + route);
+    ({ route, availability }) =>
+      withChat({ route, preview: availability }, async (page, chooserCount) => {
         await page.getByRole("button", { name: "Add attachment", exact: true }).click();
         await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
-        const camera = page.locator("openclaw-chat-camera-capture");
-        const nativeCapture = camera.getByRole("button", {
-          name: "Use device camera",
-          exact: true,
-        });
+        const nativeCapture = cameraButton(page, "Use device camera");
         await nativeCapture.waitFor();
-        expect(chooserCount).toBe(0);
+        expect(chooserCount()).toBe(0);
         const pending = page.waitForEvent("filechooser");
         await nativeCapture.click();
         const chooser = await pending;
@@ -171,56 +195,41 @@ suite.define(() => {
         expect(await chooser.element().getAttribute("accept")).toBe("image/*");
         expect(chooser.isMultiple()).toBe(false);
         await chooser.setFiles([]);
-        expect(chooserCount).toBe(1);
+        expect(chooserCount()).toBe(1);
         expect(await page.locator(".chat-attachment-thumb").count()).toBe(0);
-      });
-    },
+      }),
   );
 
-  it.each(["chat", "new"])(
-    "captures a camera photo without opening a picker in %s",
-    async (route) => {
-      await suite.withPage(
-        { permissions: ["camera"], viewport: { width: 1280, height: 900 } },
-        async ({ page }) => {
-          await installMockGateway(page, { historyMessages: [] });
-          let fileChoosers = 0;
-          page.on("filechooser", () => {
-            fileChoosers += 1;
-          });
-          await page.goto(suite.server.baseUrl + route);
-          await page.getByRole("button", { name: "Add attachment", exact: true }).click();
-          await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
-          const camera = page.locator("openclaw-chat-camera-capture");
-          const capture = camera.getByRole("button", { name: "Capture", exact: true });
-          await expect.poll(() => capture.isEnabled()).toBe(true);
-          const video = camera.locator("video");
-          const streamHandle = await video.evaluateHandle(
-            (element: HTMLVideoElement) => element.srcObject as MediaStream,
-          );
-          expect(await streamHandle.evaluate((stream) => stream.getAudioTracks().length)).toBe(0);
-          await capture.click();
-          await camera.getByRole("button", { name: "Use photo", exact: true }).waitFor();
-          expect(
-            await streamHandle.evaluate((stream) =>
-              stream.getTracks().every((track) => track.readyState === "ended"),
-            ),
-          ).toBe(true);
-          await camera.getByRole("button", { name: "Retake", exact: true }).click();
-          await expect.poll(() => capture.isEnabled()).toBe(true);
-          await capture.click();
-          await camera.getByRole("button", { name: "Use photo", exact: true }).click();
-          await expect
-            .poll(() => page.locator('.chat-attachment-thumb[aria-busy="false"]').count())
-            .toBe(1);
-          expect(fileChoosers).toBe(0);
-          expect(await page.getByRole("dialog", { name: "Take photo", exact: true }).count()).toBe(
-            0,
-          );
-          await streamHandle.dispose();
-        },
+  it.each(["chat", "new"])("captures a camera photo without opening a picker in %s", (route) =>
+    withChat({ route, cameraPermission: true }, async (page, fileChoosers) => {
+      await page.getByRole("button", { name: "Add attachment", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
+      const camera = page.locator("openclaw-chat-camera-capture");
+      const capture = cameraButton(page, "Capture");
+      await expect.poll(() => capture.isEnabled()).toBe(true);
+      const video = camera.locator("video");
+      const streamHandle = await video.evaluateHandle(
+        (element: HTMLVideoElement) => element.srcObject as MediaStream,
       );
-    },
+      expect(await streamHandle.evaluate((stream) => stream.getAudioTracks().length)).toBe(0);
+      await capture.click();
+      await cameraButton(page, "Use photo").waitFor();
+      expect(
+        await streamHandle.evaluate((stream) =>
+          stream.getTracks().every((track) => track.readyState === "ended"),
+        ),
+      ).toBe(true);
+      await cameraButton(page, "Retake").click();
+      await expect.poll(() => capture.isEnabled()).toBe(true);
+      await capture.click();
+      await cameraButton(page, "Use photo").click();
+      await expect
+        .poll(() => page.locator('.chat-attachment-thumb[aria-busy="false"]').count())
+        .toBe(1);
+      expect(fileChoosers()).toBe(0);
+      expect(await page.getByRole("dialog", { name: "Take photo", exact: true }).count()).toBe(0);
+      await streamHandle.dispose();
+    }),
   );
 
   it.each(
@@ -242,23 +251,10 @@ suite.define(() => {
       ["iOS native", "chat"],
       ["iOS web chrome", "new"],
     ].map(([name, route]) => Object.assign({}, attachmentBrowser(name), { route })),
-  )("preserves $name picker semantics in $route across widths", async (fixture) => {
-    await suite.withPage(
-      {
-        userAgent: fixture.userAgent,
-        hasTouch: fixture.touch > 0,
-        viewport: { width: 390, height: 844 },
-      },
-      async ({ page }) => {
-        await installAttachmentBrowserIdentity(page, fixture);
-        await page.addInitScript(() => {
-          navigator.mediaDevices.getUserMedia = async () => {
-            document.documentElement.dataset.cameraRequested = "true";
-            throw new DOMException("Preview permission denied", "NotAllowedError");
-          };
-        });
-        await installMockGateway(page, { historyMessages: [] });
-        await page.goto(suite.server.baseUrl + fixture.route);
+  )("preserves $name picker semantics in $route across widths", (fixture) =>
+    withChat(
+      { route: fixture.route, browser: fixture.name, preview: "record-denial" },
+      async (page) => {
         const trigger = page.getByRole("button", { name: "Add attachment", exact: true });
         const items = page.locator(".agent-chat__attach-menu-option:visible");
         for (const [width, height] of [
@@ -283,12 +279,6 @@ suite.define(() => {
         }
         for (const kind of fixture.single ? ["file"] : ["file", "photo"]) {
           const chooser = await choose(page, kind);
-          expect(chooser.isMultiple()).toBe(true);
-          expect(await chooser.element().getAttribute("class")).toBe(`agent-chat__${kind}-input`);
-          expect(await chooser.element().getAttribute("capture")).toBeNull();
-          expect(await chooser.element().getAttribute("accept")).toBe(
-            kind === "file" ? null : "image/*",
-          );
           // Boundary-only cancellation: Playwright does not exercise OS dialogs.
           await chooser.setFiles([]);
           expect(await page.locator(".chat-attachment-thumb").count()).toBe(0);
@@ -300,9 +290,6 @@ suite.define(() => {
           const draftText = "Keep this draft while taking a photo";
           await draft.fill(draftText);
           const chooser = await choose(page, "camera");
-          expect(chooser.isMultiple()).toBe(false);
-          expect(await chooser.element().getAttribute("accept")).toBe("image/*");
-          expect(await chooser.element().getAttribute("capture")).toBe("environment");
           expect(await page.getByRole("dialog", { name: "Take photo", exact: true }).count()).toBe(
             0,
           );
@@ -324,10 +311,7 @@ suite.define(() => {
           const dialog = page.getByRole("dialog", { name: "Take photo", exact: true });
           await dialog.waitFor();
           expect(await page.locator("html").getAttribute("data-camera-requested")).toBe("true");
-          await page
-            .locator("openclaw-chat-camera-capture")
-            .getByRole("button", { name: "Cancel", exact: true })
-            .click();
+          await cameraButton(page, "Cancel").click();
         }
         if (fixture.single) {
           await page.setViewportSize({ width: 390, height: 844 });
@@ -345,6 +329,6 @@ suite.define(() => {
           expect(await page.locator(".agent-chat__file-input").inputValue()).toBe("");
         }
       },
-    );
-  });
+    ),
+  );
 });

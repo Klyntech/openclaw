@@ -12,7 +12,6 @@ suite.define(() => {
       async ({ page }) => {
         await page.clock.install();
         const gateway = await installMockGateway(page, {
-          historyMessages: [],
           attachmentMaxBytes: 1024,
           agentModel: "demo/model",
           models: [{ id: "model", name: "Demo", provider: "demo" }],
@@ -30,7 +29,6 @@ suite.define(() => {
           .waitFor();
         await page.clock.fastForward(7_000);
         const failure = page.locator(".chat-attachment-failures");
-        expect(await failure.count()).toBe(1);
         expect(await failure.textContent()).toContain("Too large to send: holiday-photo.jpg");
         expect(await failure.textContent()).toContain("Choose a smaller file");
         expect(await page.locator(".chat-attachments-preview img").count()).toBe(0);
@@ -47,6 +45,15 @@ suite.define(() => {
         const id = crypto.randomUUID();
         const source = `/api/chat/media/outgoing/agent%3Amain%3Amain/${id}/full`;
         const artifactId = `artifact_managed_image_${id}`;
+        const image = {
+          type: "image",
+          artifactId,
+          url: source,
+          alt: "Holiday photo",
+          mimeType: "image/png",
+          width: 1600,
+          height: 1000,
+        };
         const bytes = attachmentImage("original.png").buffer;
         const requests: string[] = [];
         await page.route("**/api/chat/media/outgoing/**", async (route) => {
@@ -61,23 +68,7 @@ suite.define(() => {
         await installMockGateway(page, {
           agentModel: "demo/model",
           models: [{ id: "model", name: "Demo", provider: "demo" }],
-          historyMessages: [
-            {
-              role: "assistant",
-              content: [
-                {
-                  type: "image",
-                  artifactId,
-                  url: source,
-                  alt: "Holiday photo",
-                  mimeType: "image/png",
-                  width: 1600,
-                  height: 1000,
-                },
-              ],
-              timestamp: 1,
-            },
-          ],
+          historyMessages: [{ role: "assistant", content: [image], timestamp: 1 }],
           methodResponses: {
             "artifacts.download": {
               artifact: {
@@ -95,7 +86,6 @@ suite.define(() => {
         const card = page.locator(".chat-image-frame--compact");
         await card.waitFor({ state: "visible" });
         expect(requests).toEqual(["thumbnail"]);
-        expect(await card.getByRole("button", { name: "Image actions" }).count()).toBe(1);
         await card.getByRole("button", { name: "Image actions" }).click();
         const download = page.waitForEvent("download");
         await card.getByRole("menuitem", { name: "Download image" }).click();

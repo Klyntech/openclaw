@@ -23,7 +23,7 @@ suite.define(() => {
         },
         async ({ page }) => {
           await installAttachmentBrowserIdentity(page, fixture);
-          await installMockGateway(page, { historyMessages: [] });
+          await installMockGateway(page);
           // Arm interception before raw keyboard input can open a chooser.
           page.on("filechooser", () => {});
           await page.goto(suite.server.baseUrl + "chat");

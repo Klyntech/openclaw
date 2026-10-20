@@ -59,7 +59,6 @@ suite.define(() => {
         const pageError = new Promise<never>((_, reject) => {
           page.on("pageerror", (error) => {
             pageErrors.push(error);
-            console.log("CHAT_BOOT_PAGE_ERROR", error.stack);
             reject(error);
           });
         });
@@ -100,17 +99,13 @@ suite.define(() => {
           label: name,
         }));
         const owner = identities[0]!;
+        const shared = { owner: { actor: owner }, sharingRole: "owner", visibility: "shared" };
         const sessions = Array.from({ length: 300 }, (_, index) =>
           createControlUiSessionRow(
             index === 0 ? sessionKey : `agent:main:fixture-${index}`,
             index === 0 ? label : `Synthetic session ${index}`,
             1_800_000_000_000 - index,
-            {
-              pinned: index > 0 && index <= 30,
-              owner: { actor: owner },
-              sharingRole: "owner",
-              visibility: "shared",
-            },
+            Object.assign({}, shared, { pinned: index > 0 && index <= 30 }),
           ),
         );
         const historyMessages = Array.from({ length: 160 }, (_, index) => ({
@@ -127,17 +122,12 @@ suite.define(() => {
           sessions,
           historyMessages,
           workspace: "/synthetic/workspace",
-          workspaceGit: false,
           hasMultipleSessionSharingIdentities: true,
           presenceUsers: people,
           featureMethods: [
             ...defaultControlUiFeatureMethods,
             "users.list",
             "sessions.files.list",
-            "session.members.listEvidence",
-            "session.members.add",
-            "session.members.remove",
-            "session.visibility.set",
             "session.suggestions.list",
             "session.suggestions.add",
             "taskSuggestions.list",
