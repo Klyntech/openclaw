@@ -1,6 +1,7 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createGatewayActiveWorkSnapshot } from "../infra/gateway-active-work.js";
 import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
+import { retireSessionControllerInput } from "../sessions/session-controller.mailbox.js";
 import { requestRpcSourceCancellation } from "../sessions/session-controller.rpc-sources.js";
 import { rpcSourceTesting } from "../sessions/session-lifecycle-admission.test-support.js";
 import { createGatewayServerActiveWorkInspectors } from "./server-active-work.js";
@@ -20,6 +21,13 @@ vi.mock("../cron/active-jobs.js", () => ({
 vi.mock("../cron/service/active-run-cancellation.js", () => ({
   getSuspensionVisibleCronTaskRunCount: vi.fn(() => 4),
 }));
+
+afterEach(() => {
+  for (const source of rpcSourceTesting.values()) {
+    retireSessionControllerInput(source.input);
+  }
+  rpcSourceTesting.reset();
+});
 
 it("filters completed chat entries while retaining persistence and watcher blockers", async () => {
   const active = createRpcSourceForTest({}, { sessionKey: "agent:main:active" });

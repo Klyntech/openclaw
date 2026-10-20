@@ -22,11 +22,11 @@ function write(target: string, content: string | object) {
 }
 
 it.each([
-  ["missing export", false, false],
-  ["wrapped missing export", false, true],
-  ["nested SDK", true, false],
-  ["wrapped nested SDK", true, true],
-  ["channel setup classification", true, false, "channel-setup-failure"],
+  ["missing export", false, false, undefined, undefined],
+  ["wrapped missing export", false, true, undefined, undefined],
+  ["nested SDK", true, false, undefined, undefined],
+  ["wrapped nested SDK", true, true, undefined, undefined],
+  ["channel setup classification", true, false, "channel-setup-failure", undefined],
   ["plugin id requiring quoting", false, false, undefined, "custom plugin"],
 ] as const)("diagnoses %s", (_name, nestedSdk, wrapped, diagnosticCode, pluginId) => {
   const project = tempDirs.make("openclaw-sdk-skew-");

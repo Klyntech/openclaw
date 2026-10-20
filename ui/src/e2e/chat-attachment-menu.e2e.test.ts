@@ -233,24 +233,26 @@ suite.define(() => {
   );
 
   it.each(
-    [
-      ["iPhone Safari", "chat"],
-      ["iPad desktop Safari", "new"],
-      ["Android Chrome", "chat"],
-      ["Android Firefox", "new"],
-      ["Android Edge", "new"],
-      ["Android Samsung", "chat"],
-      ["Android WebView", "new"],
-      ["Android unknown app", "chat"],
-      ["Android native", "chat"],
-      ["Android web chrome", "new"],
-      ["unknown", "new"],
-      ["macOS Safari", "new"],
-      ["iOS unknown engine", "chat"],
-      ["iOS in-app", "new"],
-      ["iOS native", "chat"],
-      ["iOS web chrome", "new"],
-    ].map(([name, route]) => Object.assign({}, attachmentBrowser(name), { route })),
+    (
+      [
+        ["iPhone Safari", "chat"],
+        ["iPad desktop Safari", "new"],
+        ["Android Chrome", "chat"],
+        ["Android Firefox", "new"],
+        ["Android Edge", "new"],
+        ["Android Samsung", "chat"],
+        ["Android WebView", "new"],
+        ["Android unknown app", "chat"],
+        ["Android native", "chat"],
+        ["Android web chrome", "new"],
+        ["unknown", "new"],
+        ["macOS Safari", "new"],
+        ["iOS unknown engine", "chat"],
+        ["iOS in-app", "new"],
+        ["iOS native", "chat"],
+        ["iOS web chrome", "new"],
+      ] as const
+    ).map(([name, route]) => Object.assign({}, attachmentBrowser(name), { route })),
   )("preserves $name picker semantics in $route across widths", (fixture) =>
     withChat(
       { route: fixture.route, browser: fixture.name, preview: "record-denial" },

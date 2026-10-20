@@ -44,7 +44,7 @@ it("resolves current and ambiguous memory identities without creating missing ow
       const entry = {
         sessionId: actor.target.sessionKey === unique ? "unique-id" : "shared-id",
         updatedAt: 1,
-        incognito: true,
+        incognito: true as const,
       };
       const result = await actor.storage!.mutate(
         { type: "session.entry.create", input: { entry } },

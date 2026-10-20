@@ -182,7 +182,11 @@ it("yields contended maintenance without a transaction and reacquires admission 
   });
   other.exec("BEGIN IMMEDIATE");
   try {
-    expectStatus(backend.execute({ type: "preflight", input: undefined }), [], true);
+    expect(backend.execute({ type: "preflight", input: undefined })).toEqual({
+      sessionIds: [],
+      hasMore: true,
+      traversalComplete: false,
+    });
     backend.assertSettled();
   } finally {
     other.exec("ROLLBACK");

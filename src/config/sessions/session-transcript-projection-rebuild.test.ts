@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
+import type { EngineConnection } from "../../infra/sql-connection.js";
 import { admitSqliteSchema } from "../../infra/sqlite-schema-facts.js";
 import {
   closeOpenClawAgentDatabasesForTest,
@@ -43,7 +44,7 @@ afterEach(() => {
   closeOpenClawStateDatabaseForTest();
 });
 
-function rows(db: DatabaseSync, sql: string) {
+function rows(db: EngineConnection, sql: string) {
   return db.prepare(sql).all();
 }
 

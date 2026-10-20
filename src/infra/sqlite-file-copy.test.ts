@@ -44,7 +44,9 @@ it.each([
           : "native no-replace publication is unavailable",
       )
     : scenario === "EIO"
-      ? new fsSafe.FsSafeError("helper-failed", "native file copy failed")
+      ? new fsSafe.FsSafeError("helper-failed", "native file copy failed", {
+          cause: Object.assign(new Error("copy failed"), { code: "EIO" }),
+        })
       : new fsSafe.FsSafeError("unsupported-platform", "native file cloning is unavailable");
   let byteCopies = 0;
   if (nativeOff) {
