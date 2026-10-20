@@ -5,7 +5,6 @@ import type { ChannelGatewayContext } from "../channels/plugins/types.adapters.j
 import type { ChannelPlugin } from "../channels/plugins/types.public.js";
 import { applyLegacyDoctorMigrations } from "../commands/doctor/shared/legacy-config-compat.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/runtime.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";
@@ -17,7 +16,8 @@ import {
 } from "../test-utils/openclaw-test-state.js";
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
 import { channelReadyPatch } from "./channel-status-patches.js";
-import { createChannelManager, type ChannelManager } from "./server-channels.js";
+import type { ChannelManager } from "./server-channels.js";
+import { createTestChannelManager, waitForAbort } from "./server-channels.test-support.js";
 
 describe("channel ownership startup", () => {
   let state: OpenClawTestState;
@@ -29,9 +29,7 @@ describe("channel ownership startup", () => {
     const route = resolveAgentRoute({ cfg: ctx.cfg, channel: "discord", accountId: ctx.accountId });
     started(ctx.accountId, route.agentId);
     ctx.setStatus(channelReadyPatch({ accountId: ctx.accountId }));
-    await new Promise<void>((resolve) => {
-      ctx.abortSignal.addEventListener("abort", () => resolve(), { once: true });
-    });
+    await waitForAbort(ctx.abortSignal);
   });
 
   beforeEach(async () => {
@@ -67,13 +65,9 @@ describe("channel ownership startup", () => {
     await state.writeConfig(cfg);
     // A restarted Gateway reads persisted config without the migration's in-memory owner.
     const runtimeConfig = JSON.parse(await readFile(state.configPath, "utf8")) as OpenClawConfig;
-    const log = createSubsystemLogger("gateway/channel-ownership-test");
-    manager = createChannelManager({
-      scheduler: createTestGatewayScheduler(),
+    manager = createTestChannelManager({
       getRuntimeConfig: () => runtimeConfig,
       getPluginRegistry: () => registry,
-      channelLogs: { discord: log },
-      channelRuntimeEnvs: { discord: runtimeForLogger(log) },
     });
     await manager.startChannels();
     await vi.advanceTimersByTimeAsync(0);
@@ -85,10 +79,7 @@ describe("channel ownership startup", () => {
       channels: {
         discord: {
           enabled: true,
-          accounts: {
-            default: {},
-            patricia: {},
-          },
+          accounts: { default: {}, patricia: {} },
         },
       },
       bindings: [{ agentId: "patricia", match: { channel: "discord", accountId: "patricia" } }],

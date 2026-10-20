@@ -32,33 +32,27 @@ afterEach(() => {
   setActivePluginRegistry(previousRegistry ?? createTestChannelRegistry());
 });
 
+function gatewayContext(gateway: string) {
+  const context = createContext();
+  context.getGatewayMethodRegistry = () =>
+    createGatewayMethodRegistry([
+      {
+        name: "health",
+        scope: "operator.read",
+        owner: { kind: "core", area: "channel-startup" },
+        handler: ({ respond }: GatewayRequestHandlerOptions) => respond(true, { gateway }),
+      },
+    ]);
+  return context;
+}
+
 it.each(["operator client", "agent run", "operator tool"] as const)(
   "keeps channel requests bound to their Gateway after the initiating %s ends",
   async (caller) => {
     const continueChannelRequest = createDeferred();
     const observedGateway = createDeferred<{ gateway: string }>();
-    const ownerContext = createContext();
-    ownerContext.getGatewayMethodRegistry = () =>
-      createGatewayMethodRegistry([
-        {
-          name: "health",
-          scope: "operator.read",
-          owner: { kind: "core", area: "channel-startup" },
-          handler: ({ respond }: GatewayRequestHandlerOptions) =>
-            respond(true, { gateway: "channel-owner" }),
-        },
-      ]);
-    const callerContext = createContext();
-    callerContext.getGatewayMethodRegistry = () =>
-      createGatewayMethodRegistry([
-        {
-          name: "health",
-          scope: "operator.read",
-          owner: { kind: "core", area: "channel-startup" },
-          handler: ({ respond }: GatewayRequestHandlerOptions) =>
-            respond(true, { gateway: "starting-client" }),
-        },
-      ]);
+    const ownerContext = gatewayContext("channel-owner");
+    const callerContext = gatewayContext("starting-client");
     const startAccount = async ({ abortSignal }: ChannelGatewayContext<TestAccount>) => {
       await continueChannelRequest.promise;
       try {

@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
 import type { ChannelGatewayContextV2 } from "../channels/plugins/types.adapters.js";
-import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import { createAuthRateLimiter } from "../plugin-sdk/webhook-ingress.js";
 import { registerPluginHttpRoute } from "../plugins/http-registry.js";
 import { pluginInstanceInvocation } from "../plugins/plugin-instance-invocation.js";
@@ -25,8 +24,12 @@ import {
   readOperatorToolGatewayAuthority,
   runWithOperatorToolGatewayAuthority,
 } from "./operator-tool-gateway-authority.js";
-import { createChannelManager } from "./server-channels.js";
-import { createTestPlugin, type TestAccount } from "./server-channels.test-support.js";
+import {
+  createTestChannelManager,
+  createTestPlugin,
+  waitForAbort,
+  type TestAccount,
+} from "./server-channels.test-support.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
 import { createGatewayRequestContext } from "./server-request-context.js";
 import { makeContextParams } from "./server-request-context.test-support.js";
@@ -79,9 +82,7 @@ it.each([true, false])(
         startAccount: async (account) => {
           resolvePluginServiceScheduler().schedule({ id: "startup", delayMs: 1, run: observe });
           started.resolve(account);
-          await new Promise<void>((resolve) => {
-            account.abortSignal.addEventListener("abort", () => resolve(), { once: true });
-          });
+          await waitForAbort(account.abortSignal);
         },
       }),
     );
@@ -91,13 +92,9 @@ it.each([true, false])(
       origin: "bundled",
       plugin,
     });
-    const log = createSubsystemLogger("gateway/scheduled-account-test");
-    const manager = createChannelManager({
+    const manager = createTestChannelManager({
       scheduler: gatewayScheduler,
-      getRuntimeConfig: () => ({}),
       getPluginRegistry: () => registry,
-      channelLogs: { discord: log },
-      channelRuntimeEnvs: { discord: runtimeForLogger(log) },
     });
     const runFromRequest = async <T>(run: () => T | Promise<T>): Promise<T> => {
       const caller = new AbortController();

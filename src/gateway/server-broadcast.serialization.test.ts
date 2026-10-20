@@ -47,36 +47,71 @@ vi.mock("../logging/subsystem.js", async (importOriginal) => {
   };
 });
 
-type RecordingSocket = {
-  readyState: number;
-  bufferedAmount: number;
-  close: ReturnType<typeof vi.fn>;
-  send: ReturnType<typeof vi.fn>;
-  frames: Array<{ event: string; seq: number }>;
-};
+const makeClient = (connId: string) => makePresenceClient(connId, "operator", ["operator.read"]);
+const frameSummaries = (peer: ReturnType<typeof makeClient>) =>
+  sentFrames(peer).map(({ event, seq }: { event: string; seq: number }) => ({ event, seq }));
 
-function makeClient(connId: string): { client: GatewayWsClient; socket: RecordingSocket } {
-  const frames: Array<{ event: string; seq: number }> = [];
-  const socket: RecordingSocket = {
-    readyState: WebSocket.OPEN,
-    bufferedAmount: 0,
-    close: vi.fn(),
-    send: vi.fn((payload: string) => {
-      const frame = JSON.parse(payload) as { event: string; seq: number };
-      frames.push({ event: frame.event, seq: frame.seq });
-    }),
-    frames,
-  };
+async function createProjectedConnection(getConfig: () => OpenClawConfig) {
+  const cfg = getConfig();
+  const connection = createGatewayConnectionState({
+    scheduler: createTestGatewayScheduler(),
+    bootId: "broadcast-test",
+    cfg,
+    getRuntimeConfig: getConfig,
+  });
+  const projection = await createSessionRowProjection({
+    cfg,
+    modelCatalog: [],
+    getPolicyConfig: getConfig,
+  });
+  onTestFinished(() => projection.dispose());
+  onTestFinished(connection.attachSessionRowProjection(projection));
+  onTestFinished(() => connection.mentionInbox.dispose());
+  return { connection, projection };
+}
+
+function steeringMessage(prefix = "Model prefix") {
   return {
-    client: {
-      socket: socket as unknown as GatewayWsClient["socket"],
-      connect: { role: "operator", scopes: ["operator.read"] } as GatewayWsClient["connect"],
-      connId,
-      usesSharedGatewayAuth: false,
+    role: "user",
+    display: false,
+    content: `${prefix}\n\nUse the smaller patch.`,
+    provenance: { kind: "internal_system", sourceTool: "plugin:reviewer" },
+    __openclaw: {
+      pluginSteering: {
+        pluginId: "reviewer",
+        pluginName: "Reviewer",
+        displayText: "Use the smaller patch.",
+      },
     },
-    socket,
   };
 }
+
+function transcriptHandler(
+  connection: ReturnType<typeof createGatewayConnectionState>,
+  projection: Awaited<ReturnType<typeof createSessionRowProjection>>,
+  peers: ReturnType<typeof makeClient>[],
+) {
+  const recipients = new Set(peers.map(({ client }) => client.connId));
+  return createTranscriptUpdateBroadcastHandler({
+    broadcastToConnIds: connection.broadcastToConnIds,
+    sessionEventSubscribers: { getAll: () => recipients },
+    sessionMessageSubscribers: { get: () => recipients },
+    getSessionRowProjection: () => projection,
+  });
+}
+
+const sentFrames = (peer: ReturnType<typeof makeClient>) =>
+  peer.socket.send.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+const steeringNotice = (display = false) =>
+  expect.objectContaining({
+    event: "session.message",
+    payload: expect.objectContaining({
+      message: expect.objectContaining({
+        ...(display ? { display: true } : {}),
+        content: [{ type: "text", text: "Use the smaller patch." }],
+      }),
+    }),
+  });
 
 describe("broadcast serialization failures", () => {
   it("isolates live plugin notices from equally authorized TUI and native recipients in either order", async () => {
@@ -90,19 +125,7 @@ describe("broadcast serialization failures", () => {
         storePath: resolveSessionStorePathCore(undefined, { agentId: "main" }),
       };
       await upsertSessionEntryCore(scope, { sessionId: scope.sessionId, updatedAt: 1 });
-      const message = {
-        role: "user",
-        display: false,
-        content: "Model prefix\n\nUse the smaller patch.",
-        provenance: { kind: "internal_system", sourceTool: "plugin:reviewer" },
-        __openclaw: {
-          pluginSteering: {
-            pluginId: "reviewer",
-            pluginName: "Reviewer",
-            displayText: "Use the smaller patch.",
-          },
-        },
-      };
+      const message = steeringMessage();
       await appendTranscriptMessage(scope, { eventId: "steer", now: 1, message });
       const peers = [
         GATEWAY_CLIENT_IDS.CONTROL_UI,
@@ -114,27 +137,8 @@ describe("broadcast serialization failures", () => {
         peer.client.connect.client = { id, version: "test", platform: "test", mode: "webchat" };
         return peer;
       });
-      const connection = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "steering",
-        cfg,
-        getRuntimeConfig: () => cfg,
-      });
-      const projection = await createSessionRowProjection({
-        cfg,
-        modelCatalog: [],
-        getPolicyConfig: () => cfg,
-      });
-      onTestFinished(() => projection.dispose());
-      onTestFinished(connection.attachSessionRowProjection(projection));
-      onTestFinished(() => connection.mentionInbox.dispose());
-      const recipients = new Set(peers.map(({ client }) => client.connId));
-      const handler = createTranscriptUpdateBroadcastHandler({
-        broadcastToConnIds: connection.broadcastToConnIds,
-        sessionEventSubscribers: { getAll: () => recipients },
-        sessionMessageSubscribers: { get: () => recipients },
-        getSessionRowProjection: () => projection,
-      });
+      const { connection, projection } = await createProjectedConnection(() => cfg);
+      const handler = transcriptHandler(connection, projection, peers);
       for (const order of [peers, peers.toReversed()]) {
         connection.clients.clear();
         for (const peer of order) {
@@ -143,9 +147,7 @@ describe("broadcast serialization failures", () => {
         }
         await handler({ target: scope, messageId: "steer", messageSeq: 1, message });
         for (const peer of peers) {
-          const frames = peer.socket.send.mock.calls.map(([frame]) =>
-            JSON.parse(typeof frame === "string" ? frame : frame.toString()),
-          );
+          const frames = sentFrames(peer);
           const notices = frames.filter((frame) => frame.event === "session.message");
           expect(notices).toHaveLength(
             peer.client.connect.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI ? 1 : 0,
@@ -183,19 +185,7 @@ describe("broadcast serialization failures", () => {
         visibility: "shared",
         createdActor: { type: "human", source: "profile", id: owner.id },
       });
-      const message = {
-        role: "user",
-        display: false,
-        content: "Private model prefix\n\nUse the smaller patch.",
-        provenance: { kind: "internal_system", sourceTool: "plugin:reviewer" },
-        __openclaw: {
-          pluginSteering: {
-            pluginId: "reviewer",
-            pluginName: "Reviewer",
-            displayText: "Use the smaller patch.",
-          },
-        },
-      };
+      const message = steeringMessage("Private model prefix");
       await appendTranscriptMessage(scope, { eventId: "steer", now: 1, message });
       const makeControlUiPeer = (profile: typeof owner) => {
         const peer = makeClient(profile.id);
@@ -217,46 +207,15 @@ describe("broadcast serialization failures", () => {
       const ownerPeer = makeControlUiPeer(owner);
       const viewerPeer = makeControlUiPeer(viewer);
       const peers = [ownerPeer, viewerPeer];
-      const connection = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "steering-live-revocation",
-        cfg,
-        getRuntimeConfig: () => cfg,
-      });
-      const projection = await createSessionRowProjection({
-        cfg,
-        modelCatalog: [],
-        getPolicyConfig: () => cfg,
-      });
-      onTestFinished(() => projection.dispose());
-      onTestFinished(connection.attachSessionRowProjection(projection));
-      onTestFinished(() => connection.mentionInbox.dispose());
+      const { connection, projection } = await createProjectedConnection(() => cfg);
       for (const peer of peers) {
         connection.clients.add(peer.client);
       }
-      const recipients = new Set(peers.map(({ client }) => client.connId));
-      const handler = createTranscriptUpdateBroadcastHandler({
-        broadcastToConnIds: connection.broadcastToConnIds,
-        sessionEventSubscribers: { getAll: () => recipients },
-        sessionMessageSubscribers: { get: () => recipients },
-        getSessionRowProjection: () => projection,
-      });
+      const handler = transcriptHandler(connection, projection, peers);
       const update = { target: scope, messageId: "steer", messageSeq: 1, message };
       await handler(update);
       for (const peer of peers) {
-        const frames = peer.socket.send.mock.calls.map(([frame]) => JSON.parse(String(frame)));
-        expect(frames).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              event: "session.message",
-              payload: expect.objectContaining({
-                message: expect.objectContaining({
-                  content: [{ type: "text", text: "Use the smaller patch." }],
-                }),
-              }),
-            }),
-          ]),
-        );
+        expect(sentFrames(peer)).toEqual(expect.arrayContaining([steeringNotice()]));
         peer.socket.send.mockClear();
       }
 
@@ -285,22 +244,7 @@ describe("broadcast serialization failures", () => {
           readSpy.mockRestore();
         }
       }
-      const ownerFrames = ownerPeer.socket.send.mock.calls.map(([frame]) =>
-        JSON.parse(String(frame)),
-      );
-      expect(ownerFrames).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            event: "session.message",
-            payload: expect.objectContaining({
-              message: expect.objectContaining({
-                display: true,
-                content: [{ type: "text", text: "Use the smaller patch." }],
-              }),
-            }),
-          }),
-        ]),
-      );
+      expect(sentFrames(ownerPeer)).toEqual(expect.arrayContaining([steeringNotice(true)]));
       expect(viewerPeer.socket.send).not.toHaveBeenCalled();
     });
   });
@@ -323,7 +267,7 @@ describe("broadcast serialization failures", () => {
     expect(scoped.socket.send).not.toHaveBeenCalled();
     expect(staff.socket.send).toHaveBeenCalledTimes(8);
     broadcast("chat", { sessionKey: "agent:main:visible", text: "Visible content" });
-    expect(scoped.socket.frames).toEqual([{ event: "chat", seq: 1 }]);
+    expect(frameSummaries(scoped)).toEqual([{ event: "chat", seq: 1 }]);
 
     const unbound = createGatewayBroadcaster({ clients });
     unbound.broadcast("chat", { sessionKey: "agent:main:visible", text: "No read owner" });
@@ -361,7 +305,7 @@ describe("broadcast serialization failures", () => {
       { gatewayInstanceId: "gateway", revision: 1 },
       recipients,
     );
-    expect(scoped.socket.frames).toEqual([
+    expect(frameSummaries(scoped)).toEqual([
       { event: "chat.metadata.changed", seq: 1 },
       { event: "sessions.changed", seq: 2 },
       { event: "users.prefs.changed", seq: 3 },
@@ -392,7 +336,7 @@ describe("broadcast serialization failures", () => {
     }
     broadcast("skills.changed", { reason: "visible" });
     for (const peer of peers) {
-      expect(peer.socket.frames).toEqual([{ event: "skills.changed", seq: 1 }]);
+      expect(frameSummaries(peer)).toEqual([{ event: "skills.changed", seq: 1 }]);
     }
     expect(snapshotToJSON).not.toHaveBeenCalled();
   });
@@ -457,7 +401,7 @@ describe("broadcast serialization failures", () => {
       expect.stringContaining("presence recipient projection unavailable"),
     );
     broadcast("skills.changed", {});
-    expect(peer.socket.frames).toEqual([{ event: "skills.changed", seq: 1 }]);
+    expect(frameSummaries(peer)).toEqual([{ event: "skills.changed", seq: 1 }]);
   });
   it("keeps a real healthy peer delivering while rejecting closing and failed peers", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -562,8 +506,8 @@ describe("broadcast serialization failures", () => {
     // The next good broadcast starts at seq 1 for every client: the dropped
     // event consumed no seq, so no gap detector fires.
     broadcast("skills.changed", { reason: "recovered" });
-    expect(first.socket.frames).toEqual([{ event: "skills.changed", seq: 1 }]);
-    expect(second.socket.frames).toEqual([{ event: "skills.changed", seq: 1 }]);
+    expect(frameSummaries(first)).toEqual([{ event: "skills.changed", seq: 1 }]);
+    expect(frameSummaries(second)).toEqual([{ event: "skills.changed", seq: 1 }]);
   });
 });
 
@@ -609,20 +553,7 @@ describe("presence recipient projection", () => {
       };
       const admin = makeClient("admin");
       admin.client.connect.scopes = ["operator.admin"];
-      const connection = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "presence-projection",
-        cfg,
-        getRuntimeConfig: () => cfg,
-      });
-      const projection = await createSessionRowProjection({
-        cfg,
-        modelCatalog: [],
-        getPolicyConfig: () => cfg,
-      });
-      onTestFinished(() => projection.dispose());
-      onTestFinished(connection.attachSessionRowProjection(projection));
-      onTestFinished(() => connection.mentionInbox.dispose());
+      const { connection } = await createProjectedConnection(() => cfg);
       const person = {
         text: "watcher",
         ts: 42,

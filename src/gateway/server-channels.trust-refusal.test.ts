@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelGatewayContext } from "../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../channels/plugins/types.public.js";
 import { collectChannelStatusIssues } from "../infra/channels-status-issues.js";
-import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import { createPluginRuntimeMock } from "../plugin-sdk/test-helpers/plugin-runtime-mock.js";
 import { createEmptyPluginRegistry, createPluginRegistry } from "../plugins/registry.js";
 import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/runtime.js";
@@ -13,7 +12,8 @@ import { DEFAULT_ACCOUNT_ID } from "../routing/session-key.js";
 import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
-import { createChannelManager, type ChannelManager } from "./server-channels.js";
+import type { ChannelManager } from "./server-channels.js";
+import { createTestChannelManager } from "./server-channels.test-support.js";
 
 describe("channel startup trust refusal", () => {
   let previousRegistry: ReturnType<typeof getActivePluginRegistry>;
@@ -83,13 +83,8 @@ describe("channel startup trust refusal", () => {
     api.registerChannel({ plugin });
     builder.registry.plugins.push(record);
     setActivePluginRegistry(builder.registry);
-    const log = createSubsystemLogger("gateway/channel-trust-refusal-test");
-    manager = createChannelManager({
-      scheduler: createTestGatewayScheduler(),
-      getRuntimeConfig: () => ({}),
+    manager = createTestChannelManager({
       getPluginRegistry: () => builder.registry,
-      channelLogs: { discord: log },
-      channelRuntimeEnvs: { discord: runtimeForLogger(log) },
     });
     const healthMonitor = startChannelHealthMonitor({
       scheduler: createTestGatewayScheduler("fake-timers"),
