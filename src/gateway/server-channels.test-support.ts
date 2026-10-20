@@ -1,3 +1,4 @@
+import type { getCredentialUnavailableDiagnostics } from "../channels/account-snapshot-fields.js";
 import type { ChannelGatewayAdapterV2 } from "../channels/plugins/types.adapters.js";
 import type {
   ChannelAccountSnapshot,
@@ -9,6 +10,7 @@ import { createEmptyPluginRegistry, type PluginRegistry } from "../plugins/regis
 import { requireActivePluginChannelRegistry } from "../plugins/runtime.js";
 import type { PluginRuntime } from "../plugins/runtime/types.js";
 import { DEFAULT_ACCOUNT_ID } from "../routing/session-key.js";
+import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { evaluateChannelHealth } from "./channel-health-policy.js";
 import { createChannelManager } from "./server-channels.js";
@@ -18,11 +20,7 @@ type TestPlugin = ChannelPlugin<TestAccount, unknown, unknown, 1 | 2>;
 export type TestAccount = {
   enabled?: boolean;
   configured?: boolean;
-  credentialDiagnostics?: Array<{
-    code: "CREDENTIAL_FILE_UNAVAILABLE";
-    path: string;
-    reason: string;
-  }>;
+  credentialDiagnostics?: ReturnType<typeof getCredentialUnavailableDiagnostics>;
 };
 
 export function healthOf(account: ChannelAccountSnapshot | undefined) {
@@ -52,7 +50,6 @@ export function createTestPlugin(params?: {
 }): ChannelPlugin<TestAccount, unknown, unknown, 2> {
   const id = params?.id ?? "discord";
   const account = params?.account ?? { enabled: true, configured: true };
-  const includeDescribeAccount = params?.includeDescribeAccount !== false;
   const config: ChannelPlugin<TestAccount>["config"] = {
     listAccountIds: params?.listAccountIds ?? (() => [DEFAULT_ACCOUNT_ID]),
     resolveAccount: params?.resolveAccount ?? (() => account),
@@ -63,7 +60,7 @@ export function createTestPlugin(params?: {
     ...(params?.unconfiguredReason ? { unconfiguredReason: params.unconfiguredReason } : {}),
     ...(params?.unlinkedReason ? { unlinkedReason: params.unlinkedReason } : {}),
   };
-  if (includeDescribeAccount) {
+  if (params?.includeDescribeAccount !== false) {
     config.describeAccount =
       params?.describeAccount ??
       ((resolved) => ({
@@ -75,10 +72,7 @@ export function createTestPlugin(params?: {
   return {
     id,
     meta: {
-      id,
-      label: id,
-      selectionLabel: id,
-      docsPath: `/channels/${id}`,
+      ...createChannelTestPluginBase({ id }).meta,
       blurb: "test stub",
       ...(params?.order === undefined ? {} : { order: params.order }),
     },

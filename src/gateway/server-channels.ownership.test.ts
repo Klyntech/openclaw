@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { createAccountListHelpers } from "../channels/plugins/account-helpers.js";
 import type { ChannelGatewayContext } from "../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../channels/plugins/types.public.js";
@@ -10,31 +10,31 @@ import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/run
 import { resolveAgentRoute } from "../routing/resolve-route.js";
 import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
-import {
-  createOpenClawTestState,
-  type OpenClawTestState,
-} from "../test-utils/openclaw-test-state.js";
+import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
 import { channelReadyPatch } from "./channel-status-patches.js";
 import type { ChannelManager } from "./server-channels.js";
 import { createTestChannelManager, waitForAbort } from "./server-channels.test-support.js";
 
-let state: OpenClawTestState;
-let manager: ChannelManager;
-let registry: ReturnType<typeof createEmptyPluginRegistry>;
-let previousRegistry: ReturnType<typeof getActivePluginRegistry>;
-const started = vi.fn<(accountId: string, ownerAgentId: string) => void>();
-const startAccount = vi.fn(async (ctx: ChannelGatewayContext) => {
-  const route = resolveAgentRoute({ cfg: ctx.cfg, channel: "discord", accountId: ctx.accountId });
-  started(ctx.accountId, route.agentId);
-  ctx.setStatus(channelReadyPatch({ accountId: ctx.accountId }));
-  await waitForAbort(ctx.abortSignal);
-});
-
-beforeEach(async () => {
-  state = await createOpenClawTestState({ label: "channel-ownership" });
-  previousRegistry = getActivePluginRegistry();
-  registry = createEmptyPluginRegistry();
+async function start(cfg: OpenClawConfig) {
+  const state = await createOpenClawTestState({ label: "channel-ownership" });
+  const previousRegistry = getActivePluginRegistry();
+  const registry = createEmptyPluginRegistry();
+  let manager: ChannelManager | undefined;
+  onTestFinished(async () => {
+    await manager?.stopChannel("discord");
+    manager = undefined;
+    vi.useRealTimers();
+    setActivePluginRegistry(previousRegistry ?? createEmptyPluginRegistry());
+    await state.cleanup();
+  });
+  const started = vi.fn<(accountId: string, ownerAgentId: string) => void>();
+  const startAccount = vi.fn(async (ctx: ChannelGatewayContext) => {
+    const route = resolveAgentRoute({ cfg: ctx.cfg, channel: "discord", accountId: ctx.accountId });
+    started(ctx.accountId, route.agentId);
+    ctx.setStatus(channelReadyPatch({ accountId: ctx.accountId }));
+    await waitForAbort(ctx.abortSignal);
+  });
   const plugin: ChannelPlugin = {
     ...createChannelTestPluginBase({
       id: "discord",
@@ -48,19 +48,6 @@ beforeEach(async () => {
   registry.channels.push({ pluginId: plugin.id, source: "test", plugin });
   setActivePluginRegistry(registry);
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-});
-
-afterEach(async () => {
-  await manager?.stopChannel("discord");
-  vi.useRealTimers();
-  vi.restoreAllMocks();
-  started.mockClear();
-  startAccount.mockClear();
-  setActivePluginRegistry(previousRegistry ?? createEmptyPluginRegistry());
-  await state.cleanup();
-});
-
-async function start(cfg: OpenClawConfig) {
   await state.writeConfig(cfg);
   // A restarted Gateway reads persisted config without the migration's in-memory owner.
   const runtimeConfig = JSON.parse(await readFile(state.configPath, "utf8")) as OpenClawConfig;
@@ -70,10 +57,11 @@ async function start(cfg: OpenClawConfig) {
   });
   await manager.startChannels();
   await vi.advanceTimersByTimeAsync(0);
+  return { manager, started, startAccount };
 }
 
 it("blocks an unowned account without retrying while its bound sibling stays online", async () => {
-  await start({
+  const { manager, started, startAccount } = await start({
     agents: { ownership: "explicit", entries: { main: {}, patricia: {} } },
     channels: { discord: { enabled: true, accounts: { default: {}, patricia: {} } } },
     bindings: [{ agentId: "patricia", match: { channel: "discord", accountId: "patricia" } }],
@@ -120,7 +108,7 @@ it.each([
       channels: { discord: { enabled: true } },
     };
     const repaired = applyLegacyDoctorMigrations(raw, { sourceConfigBeforeMigrations: raw });
-    await start(repaired.next as OpenClawConfig);
+    const { manager, started } = await start(repaired.next as OpenClawConfig);
     expect(manager.getRuntimeSnapshot().channelAccounts.discord?.default).toMatchObject({
       running: true,
       connected: true,

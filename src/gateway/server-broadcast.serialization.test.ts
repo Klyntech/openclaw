@@ -47,13 +47,16 @@ vi.mock("../logging/subsystem.js", async (importOriginal) => {
 const makeClient = (connId: string) => makePresenceClient(connId, "operator", ["operator.read"]);
 const frameSummaries = (peer: ReturnType<typeof makeClient>) =>
   sentFrames(peer).map(({ event, seq }: { event: string; seq: number }) => ({ event, seq }));
-const expectedFrame = (event: string, payload: unknown, seq = 1, extra = {}) => ({
-  type: "event",
-  event,
-  payload,
-  seq,
-  ...extra,
-});
+function expectFrame(
+  peer: ReturnType<typeof makeClient>,
+  event: string,
+  payload: unknown,
+  extra = {},
+) {
+  expect(String(peer.socket.send.mock.lastCall![0])).toBe(
+    JSON.stringify({ type: "event", event, payload, seq: 1, ...extra }),
+  );
+}
 const profile = (profileId: string, displayName: string | null = null, updatedAt = 1) => ({
   profileId,
   displayName,
@@ -138,6 +141,12 @@ function transcriptHandler(
 
 const sentFrames = (peer: ReturnType<typeof makeClient>) =>
   peer.socket.send.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+const lastFrame = (peer: ReturnType<typeof makeClient>) =>
+  JSON.parse(String(peer.socket.send.mock.lastCall![0])) as {
+    payload: { presence: SystemPresence[] };
+    seq: number;
+    stateVersion: Record<string, number>;
+  };
 const steeringNotice = (display = false) =>
   expect.objectContaining({
     event: "session.message",
@@ -406,14 +415,10 @@ describe("broadcast serialization failures", () => {
 
     expect(reads).toEqual([initial, initial + " changed", initial]);
     for (const [index, peer] of peers.entries()) {
-      expect(String(peer.socket.send.mock.calls[0]?.[0])).toBe(
-        JSON.stringify(
-          expectedFrame("session.message", {
-            message: { text: reads[index] },
-            session: { sharingRole: peer.client.connId },
-          }),
-        ),
-      );
+      expectFrame(peer, "session.message", {
+        message: { text: reads[index] },
+        session: { sharingRole: peer.client.connId },
+      });
     }
   });
 
@@ -535,15 +540,7 @@ describe("presence recipient projection", () => {
       const admin = makeClient("admin");
       admin.client.connect.scopes = ["operator.admin"];
       const { connection } = await createProjectedConnection(() => cfg);
-      const person = {
-        text: "watcher",
-        ts: 42,
-        onlineSince: 30,
-        lastActivityAt: 40,
-        timeZone: "Europe/Vienna",
-        instanceId: "watcher",
-        user: { id: "creator", name: "Creator" },
-      };
+      const person = { text: "watcher", ts: 42, user: { id: "creator", name: "Creator" } };
       const watcher = { ...person, watchedSessions: [...keys, "agent:main:deleted"] };
       const presence = [watcher, { ...person, text: "idle", instanceId: "idle", ts: 41 }];
       Object.freeze(watcher.watchedSessions);
@@ -551,13 +548,6 @@ describe("presence recipient projection", () => {
       Object.freeze(presence);
       const payload = { presence };
       const stateVersion = { presence: 7, health: 3 };
-      const lastFrame = (peer: ReturnType<typeof makeClient>) =>
-        // SAFETY: These sockets record JSON frames emitted by the real presence broadcaster below.
-        JSON.parse(peer.socket.send.mock.lastCall![0]) as {
-          payload: { presence: SystemPresence[] };
-          seq: number;
-          stateVersion: typeof stateVersion;
-        };
       for (const order of [
         [reader, admin],
         [admin, reader],
@@ -607,8 +597,11 @@ describe("presence recipient projection", () => {
       connection.broadcastToConnIds("presence", payload, new Set([reader.client.connId]), {
         stateVersion,
       });
-      expect(lastFrame(reader)).toEqual(
-        expectedFrame("presence", { presence: [person, presence[1]] }, 4, { stateVersion }),
+      expectFrame(
+        reader,
+        "presence",
+        { presence: [person, presence[1]] },
+        { seq: 4, stateVersion },
       );
       expect(lastFrame(admin).seq).toBe(3);
       expect(watcher.watchedSessions).toEqual([...keys, "agent:main:deleted"]);
@@ -627,14 +620,7 @@ describe("presence recipient projection", () => {
         createdVia: "operator",
         createdActor: { type: "human", source: "profile", id: "creator" },
       });
-      const person = {
-        text: "watcher",
-        ts: 3,
-        onlineSince: 1,
-        lastActivityAt: 2,
-        timeZone: "Europe/Vienna",
-        user: { id: "creator" },
-      };
+      const person = { text: "watcher", ts: 3, user: { id: "creator" } };
       const idle = { ...person, text: "idle" };
       const presence = [{ ...person, watchedSessions: [key] }, idle];
       const solo = makeClient("solo").client;
@@ -722,24 +708,21 @@ describe("presence payload encoding", () => {
     expect(project).toHaveBeenCalledTimes(4);
     for (const [index, peer] of peers.entries()) {
       expect(Buffer.isBuffer(peer.socket.send.mock.lastCall![0])).toBe(true);
-      expect(String(peer.socket.send.mock.lastCall![0])).toBe(
-        JSON.stringify(
-          expectedFrame(
-            "presence",
-            { presence: index < 2 ? visible : hidden },
-            index === 1 ? 2 : 1,
-            {
-              stateVersion,
-              recipientProfileId: peer.client.connId,
-            },
-          ),
-        ),
+      expectFrame(
+        peer,
+        "presence",
+        { presence: index < 2 ? visible : hidden },
+        {
+          seq: index === 1 ? 2 : 1,
+          stateVersion,
+          recipientProfileId: peer.client.connId,
+        },
       );
     }
 
     visible[0]!.ts = 2;
     broadcast("presence", { presence: visible });
-    expect(JSON.parse(peers[0]!.socket.send.mock.lastCall![0]).payload.presence[0].ts).toBe(2);
+    expect(lastFrame(peers[0]!).payload.presence[0]?.ts).toBe(2);
   });
 
   it.each(["getter", "toJSON", "added field"])(
@@ -786,7 +769,7 @@ describe("presence payload encoding", () => {
           publisher === "added field" && index === 0
             ? { presence }
             : { presence: publisher === "getter" ? hidden : presence, revision: index + 1 };
-        expect(JSON.parse(peer.socket.send.mock.lastCall![0]).payload).toEqual(expected);
+        expect(lastFrame(peer).payload).toEqual(expected);
       }
       expect(reads).toEqual(publisher === "added field" ? [] : [1, 2]);
     },
