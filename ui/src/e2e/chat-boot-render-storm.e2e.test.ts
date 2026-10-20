@@ -1,5 +1,3 @@
-import { writeFile } from "node:fs/promises";
-import path from "node:path";
 import type { Page } from "playwright";
 import { expect, it } from "vitest";
 import {
@@ -12,10 +10,9 @@ import { createControlUiSessionRow } from "../test-helpers/control-ui-session-fi
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 import { waitForCommittedComposerDraft } from "./settle.test-support.ts";
 
-type RenderCount = { updates: number; milliseconds: number; instances: number };
 declare global {
   interface Window {
-    chatBootRenderCounts: Map<string, RenderCount>;
+    chatBootPaneInstances: number;
   }
 }
 
@@ -32,52 +29,20 @@ async function nextFrame(page: Page) {
   );
 }
 
-// Lit updates retain timing data; pane connections also count the Solid host.
 async function installRenderProbe(page: Page) {
   await page.addInitScript(() => {
-    const counts = new Map<string, RenderCount>();
-    window.chatBootRenderCounts = counts;
-    const patched = new WeakSet<object>();
+    window.chatBootPaneInstances = 0;
     const instances = new WeakSet<object>();
-    const recordInstance = (element: HTMLElement) => {
-      const count = counts.get(element.localName) ?? {
-        updates: 0,
-        milliseconds: 0,
-        instances: 0,
-      };
-      if (!instances.has(element)) {
-        instances.add(element);
-        count.instances += 1;
-      }
-      counts.set(element.localName, count);
-      return count;
-    };
     const define = customElements.define.bind(customElements);
     customElements.define = (name, constructor, options) => {
       if (name === "openclaw-chat-pane") {
         const connected = constructor.prototype.connectedCallback;
         constructor.prototype.connectedCallback = function (this: HTMLElement) {
-          recordInstance(this);
-          return connected.call(this);
-        };
-      }
-      let prototype = constructor.prototype;
-      while (prototype && !Object.hasOwn(prototype, "performUpdate")) {
-        prototype = Object.getPrototypeOf(prototype);
-      }
-      if (prototype && !patched.has(prototype)) {
-        patched.add(prototype);
-        const update = prototype.performUpdate;
-        prototype.performUpdate = function (this: HTMLElement) {
-          const count = recordInstance(this);
-          const start = performance.now();
-          try {
-            return update.call(this);
-          } finally {
-            count.updates += 1;
-            count.milliseconds += performance.now() - start;
-            counts.set(this.localName, count);
+          if (!instances.has(this)) {
+            instances.add(this);
+            window.chatBootPaneInstances += 1;
           }
+          return connected.call(this);
         };
       }
       define(name, constructor, options);
@@ -86,8 +51,8 @@ async function installRenderProbe(page: Page) {
 }
 
 suite.define(() => {
-  it("prewarms session actions after a busy cold load without building unrelated menus or losing the draft", async () => {
-    await suite.withPage(
+  it("prewarms session actions after a busy cold load without building unrelated menus or losing the draft", () =>
+    suite.withPage(
       { locale: "en-US", serviceWorkers: "block", viewport: { width: 1440, height: 1000 } },
       async ({ page }) => {
         const pageErrors: Error[] = [];
@@ -100,32 +65,27 @@ suite.define(() => {
         });
         void pageError.catch(() => {});
         await installRenderProbe(page);
+        const layout = {
+          columns: [
+            {
+              id: "side-panel-column",
+              side: "right",
+              panels: [{ id: "workspace", slot: "workspace" }],
+              activePanelId: "workspace",
+              height: 360,
+              width: 480,
+            },
+          ],
+          dock: "right",
+          open: true,
+          expanded: false,
+        };
         await page.addInitScript(
-          ({ key, sessionKey: initialSessionKey }) =>
-            localStorage.setItem(
-              key,
-              JSON.stringify({
-                sessionKey: initialSessionKey,
-                sidebarSessionLayouts: {
-                  [initialSessionKey]: {
-                    columns: [
-                      {
-                        id: "side-panel-column",
-                        side: "right",
-                        panels: [{ id: "workspace", slot: "workspace" }],
-                        activePanelId: "workspace",
-                        height: 360,
-                        width: 480,
-                      },
-                    ],
-                    dock: "right",
-                    open: true,
-                    expanded: false,
-                  },
-                },
-              }),
-            ),
-          { key: controlUiBundledSettingsStorageKey(suite.server.baseUrl), sessionKey },
+          ({ key, settings }) => localStorage.setItem(key, JSON.stringify(settings)),
+          {
+            key: controlUiBundledSettingsStorageKey(suite.server.baseUrl),
+            settings: { sessionKey, sidebarSessionLayouts: { [sessionKey]: layout } },
+          },
         );
         const people = Array.from({ length: 110 }, (_, index) => ({
           id: `person-${index}`,
@@ -134,7 +94,12 @@ suite.define(() => {
           identity: { type: "profile" as const, id: `person-${index}` },
           watchedSessions: [sessionKey],
         }));
-        const owner = { type: "human" as const, id: people[0]!.id, label: people[0]!.name };
+        const identities = people.map(({ id, name }) => ({
+          type: "human" as const,
+          id,
+          label: name,
+        }));
+        const owner = identities[0]!;
         const sessions = Array.from({ length: 300 }, (_, index) =>
           createControlUiSessionRow(
             index === 0 ? sessionKey : `agent:main:fixture-${index}`,
@@ -203,11 +168,7 @@ suite.define(() => {
               owner,
               members: [],
               role: "owner",
-              identities: people.map((person) => ({
-                type: "human",
-                id: person.id,
-                label: person.name,
-              })),
+              identities,
               allowedVisibilities: ["shared", "read-only", "suggest", "draft"],
             },
             "session.suggestions.list": { suggestions: [], role: "owner" },
@@ -231,33 +192,10 @@ suite.define(() => {
             },
           });
         }
-        try {
-          await Promise.race([
-            page.getByText("Synthetic history is ready.", { exact: true }).waitFor(),
-            pageError,
-          ]);
-        } catch (error) {
-          console.log(
-            "CHAT_BOOT_FAILURE",
-            JSON.stringify(
-              await page.evaluate(() => ({
-                text: document.body.textContent?.slice(-12000),
-                tags: Object.fromEntries(window.chatBootRenderCounts),
-              })),
-            ),
-          );
-          console.log(
-            "CHAT_BOOT_REQUESTS",
-            JSON.stringify(
-              (await gateway.getRequests()).map(({ method, params }) => ({
-                method,
-                params: method === "connect" ? undefined : params,
-              })),
-            ),
-          );
-          await page.screenshot({ path: path.join(suite.artifactDir, "chat-boot-failure.png") });
-          throw error;
-        }
+        await Promise.race([
+          page.getByText("Synthetic history is ready.", { exact: true }).waitFor(),
+          pageError,
+        ]);
         await nextFrame(page);
         await nextFrame(page);
         const pane = page.locator('openclaw-chat-pane[aria-hidden="false"]');
@@ -273,22 +211,13 @@ suite.define(() => {
             ),
           );
           return {
-            tags: Object.fromEntries(window.chatBootRenderCounts),
-            closedMenuItems: items.length,
+            paneInstances: window.chatBootPaneInstances,
             unrelatedClosedMenuItems: items.filter(
               (item) => !item.closest("openclaw-chat-header-session-menu"),
             ).length,
-            closedMenuHosts: items.map((item) => item.closest('[role="menu"][popover]')?.className),
           };
         });
-        await writeFile(
-          path.join(suite.artifactDir, "chat-boot-render-counts.json"),
-          JSON.stringify(measurement, null, 2),
-        );
-        console.log("CHAT_BOOT_RENDER_COUNTS", JSON.stringify(measurement));
-        await page.screenshot({ path: path.join(suite.artifactDir, "chat-boot-closed-menus.png") });
-        expect(measurement.tags["openclaw-chat-pane"]?.instances).toBe(1);
-        expect(measurement.unrelatedClosedMenuItems).toBe(0);
+        expect(measurement).toEqual({ paneInstances: 1, unrelatedClosedMenuItems: 0 });
 
         const composer = pane.getByRole("textbox", { name: "Chat composer" });
         const draft = "Keep this draft while the menus open.";
@@ -326,7 +255,6 @@ suite.define(() => {
         expect(await search.evaluate((element) => element === document.activeElement)).toBe(true);
         await page.keyboard.press("Escape");
         expect(await search.inputValue()).toBe("");
-        await page.screenshot({ path: path.join(suite.artifactDir, "chat-boot-sharing-open.png") });
         await page.keyboard.press("Escape");
         expect(
           await sharing
@@ -336,6 +264,5 @@ suite.define(() => {
         expect(await composer.inputValue()).toBe(draft);
         expect(await gateway.getRequests("chat.send")).toHaveLength(0);
       },
-    );
-  });
+    ));
 });

@@ -2,7 +2,8 @@ import type { FileChooser, Page } from "playwright";
 import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import {
-  attachmentBrowserFixtures,
+  attachmentBrowser,
+  attachmentImage,
   attachmentOption,
   installAttachmentBrowserIdentity,
 } from "./chat-attachment-menu.test-support.ts";
@@ -63,69 +64,62 @@ async function expectPickerAtPlusButton(chooser: FileChooser) {
 }
 
 suite.define(() => {
-  it.each(["chat", "new"])("positions the upload input at the plus button in %s", async (route) => {
-    const fixture = attachmentBrowserFixtures.find(
-      (candidate) => candidate.name === "iPhone Safari",
-    )!;
+  it.each(
+    ["chat", "new"].flatMap((route) =>
+      ["iPhone Safari", "iOS Chrome"].map((name) => ({ route, name })),
+    ),
+  )("anchors $name upload and fallback pickers in $route", async ({ route, name }) => {
+    const fixture = attachmentBrowser(name);
+    const cameraFallback = name === "iOS Chrome";
     await suite.withPage(
       { userAgent: fixture.userAgent, hasTouch: true, viewport: { width: 390, height: 844 } },
       async ({ page }) => {
         await installAttachmentBrowserIdentity(page, fixture);
         await capturePickerGeometry(page);
-        await installMockGateway(page, { historyMessages: [] });
-        await page.goto(suite.server.baseUrl + route);
-        for (const viewport of [
-          { width: 390, height: 844 },
-          { width: 320, height: 568 },
-        ]) {
-          await page.setViewportSize(viewport);
-          const trigger = page.getByRole("button", { name: "Add attachment", exact: true });
-          await trigger.click();
-          const pending = page.waitForEvent("filechooser");
-          await page.locator('.agent-chat__attach-menu-option[data-value="file"]').click();
-          const chooser = await pending;
-          await expectPickerAtPlusButton(chooser);
-          expect(await chooser.element().getAttribute("tabindex")).toBe("-1");
-          await chooser.setFiles([]);
-        }
-      },
-    );
-  });
-
-  it.each(["chat", "new"])("refreshes camera fallback picker geometry in %s", async (route) => {
-    const fixture = attachmentBrowserFixtures.find((candidate) => candidate.name === "iOS Chrome")!;
-    await suite.withPage(
-      { userAgent: fixture.userAgent, hasTouch: true, viewport: { width: 390, height: 844 } },
-      async ({ page }) => {
-        await installAttachmentBrowserIdentity(page, fixture);
-        await capturePickerGeometry(page);
-        await page.addInitScript(() => {
-          Object.defineProperty(navigator, "mediaDevices", {
-            configurable: true,
-            value: undefined,
+        if (cameraFallback) {
+          await page.addInitScript(() => {
+            Object.defineProperty(navigator, "mediaDevices", {
+              configurable: true,
+              value: undefined,
+            });
           });
-        });
+        }
         await installMockGateway(page, { historyMessages: [] });
         await page.goto(suite.server.baseUrl + route);
         const trigger = page.getByRole("button", { name: "Add attachment", exact: true });
         const camera = page.locator("openclaw-chat-camera-capture");
-        for (const [width, height, action] of [
-          [390, 844, "Upload photo"],
-          [320, 568, "Upload photo"],
-          [932, 430, "Use device camera"],
-        ] as const) {
-          // First-use upload, then a prior Photo selection followed by composer re-layout.
-          if (width === 320) {
+        const widths: [number, number][] = [
+          [390, 844],
+          [320, 568],
+        ];
+        if (cameraFallback) {
+          widths.push([932, 430]);
+        }
+        for (const [width, height] of widths) {
+          // Exercise a prior Photo selection before the fallback picker is repositioned.
+          if (cameraFallback && width === 320) {
             const chooser = await choose(page, "photo");
             await expectPickerAtPlusButton(chooser);
             await chooser.setFiles([]);
           }
           await page.setViewportSize({ width, height });
           await trigger.click();
-          await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
           const pending = page.waitForEvent("filechooser");
-          await camera.getByRole("button", { name: action, exact: true }).click();
+          if (cameraFallback) {
+            await page.getByRole("menuitem", { name: "Take photo", exact: true }).click();
+            await camera
+              .getByRole("button", {
+                name: width === 932 ? "Use device camera" : "Upload photo",
+                exact: true,
+              })
+              .click();
+          } else {
+            await attachmentOption(page, "file").click();
+          }
           const chooser = await pending;
+          if (!cameraFallback) {
+            expect(await chooser.element().getAttribute("tabindex")).toBe("-1");
+          }
           await expectPickerAtPlusButton(chooser);
           await chooser.setFiles([]);
         }
@@ -247,13 +241,7 @@ suite.define(() => {
       ["iOS in-app", "new"],
       ["iOS native", "chat"],
       ["iOS web chrome", "new"],
-    ].map(([name, route]) => {
-      const fixture = attachmentBrowserFixtures.find((candidate) => candidate.name === name);
-      if (!fixture) {
-        throw new Error(`Missing attachment fixture: ${name}`);
-      }
-      return Object.assign({}, fixture, { route });
-    }),
+    ].map(([name, route]) => Object.assign({}, attachmentBrowser(name), { route })),
   )("preserves $name picker semantics in $route across widths", async (fixture) => {
     await suite.withPage(
       {
@@ -321,14 +309,7 @@ suite.define(() => {
           expect(await page.locator("html").getAttribute("data-camera-requested")).toBeNull();
           await chooser.setFiles([]);
           expect(await draft.inputValue()).toBe(draftText);
-          const photo = {
-            name: "camera.png",
-            mimeType: "image/png",
-            buffer: Buffer.from(
-              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-              "base64",
-            ),
-          };
+          const photo = attachmentImage("camera.png");
           await (await choose(page, "camera")).setFiles(photo);
           const ready = page.locator('.chat-attachment-thumb[aria-busy="false"]');
           await expect.poll(() => ready.count()).toBe(1);

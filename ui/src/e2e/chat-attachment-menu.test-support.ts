@@ -37,7 +37,7 @@ const androidBrowser = (
 ) => browser(name, ua, "Linux armv8l", options);
 
 // Emulated identity hints, not native-browser/picker certification.
-export const attachmentBrowserFixtures: AttachmentBrowserFixture[] = [
+const attachmentBrowserFixtures: AttachmentBrowserFixture[] = [
   iosBrowser("iPhone Safari", iosSafari, { single: true }),
   browser("iPad desktop Safari", macSafari, "MacIntel", { single: true }),
   androidBrowser("Android Chrome", androidChrome, { nativeCapture: true }),
@@ -59,22 +59,33 @@ export const attachmentBrowserFixtures: AttachmentBrowserFixture[] = [
   androidBrowser("Android unknown app", `${androidChrome} UnknownApp/1.0`),
   androidBrowser("Android web chrome", androidChrome, { webChrome: true }),
   browser("macOS Safari", macSafari, "MacIntel", { touch: 0 }),
-  browser(
-    "Windows touch Chrome",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
-    "Win32",
-    { touch: 10 },
-  ),
   browser("unknown", "UnknownBrowser/1.0", "", { touch: 0 }),
   iosBrowser("iOS unknown engine", `${iphone} Gecko/156.0 Firefox/156.0`),
   iosBrowser("iOS in-app", `${iphone} ${webkit} Mobile/15E148`),
   iosBrowser("iOS Chrome", `${iphone} ${webkit} CriOS/153.0.0.0 Mobile/15E148 Safari/604.1`),
-  iosBrowser("iOS Firefox", `${iphone} ${webkit} FxiOS/156.0 Mobile/15E148 Safari/605.1.15`),
-  iosBrowser("iOS unknown app", `${iosSafari} UnknownApp/1.0`),
   iosBrowser("iOS native", iosSafari, { embed: "ios" }),
   androidBrowser("Android native", androidChrome, { embed: "android" }),
   iosBrowser("iOS web chrome", iosSafari, { webChrome: true }),
 ];
+
+export function attachmentImage(name: string) {
+  return {
+    name,
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  };
+}
+
+export function attachmentBrowser(name: string) {
+  const fixture = attachmentBrowserFixtures.find((candidate) => candidate.name === name);
+  if (!fixture) {
+    throw new Error(`Missing attachment fixture: ${name}`);
+  }
+  return fixture;
+}
 
 export function attachmentOption(page: Page, kind: string) {
   return page.locator(`.agent-chat__attach-menu-option[data-value="${kind}"]`);

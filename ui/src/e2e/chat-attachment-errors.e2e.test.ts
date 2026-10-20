@@ -1,15 +1,13 @@
-import { readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { expect, it } from "vitest";
-import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
+import { attachmentImage } from "./chat-attachment-menu.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Mobile attachment errors" });
 
 suite.define(() => {
-  it.each(["chat", "new"])("keeps rejected files readable and removable in %s", async (route) => {
-    await suite.withPage(
+  it.each(["chat", "new"])("keeps rejected files readable and removable in %s", (route) =>
+    suite.withPage(
       { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true },
       async ({ page }) => {
         await page.clock.install();
@@ -20,9 +18,6 @@ suite.define(() => {
           models: [{ id: "model", name: "Demo", provider: "demo" }],
         });
         await page.goto(suite.server.baseUrl + route);
-        const composer = page
-          .locator(route === "new" ? ".new-session-page__composer" : ".agent-chat__input")
-          .first();
         const input = page.locator(".agent-chat__file-input").first();
         await input.setInputFiles({
           name: "holiday-photo.jpg",
@@ -34,14 +29,6 @@ suite.define(() => {
           .getByText("Too large to send: holiday-photo.jpg", { exact: true })
           .waitFor();
         await page.clock.fastForward(7_000);
-        if (process.env.OPENCLAW_CAPTURE_UI_PROOF === "1") {
-          const frame = await takeControlUiScreenshotFrame(page, composer, [composer], {
-            animations: "disabled",
-          });
-          const screenshot = path.join(suite.artifactDir, `${route}-attachment-error.png`);
-          await writeFile(screenshot, frame.png);
-          console.log(JSON.stringify({ screenshot }));
-        }
         const failure = page.locator(".chat-attachment-failures");
         expect(await failure.count()).toBe(1);
         expect(await failure.textContent()).toContain("Too large to send: holiday-photo.jpg");
@@ -51,18 +38,16 @@ suite.define(() => {
         await page.getByRole("button", { name: "Remove holiday-photo.jpg", exact: true }).click();
         expect(await failure.count()).toBe(0);
       },
-    );
-  });
-  it("downloads the original only on request when a preview is unavailable", async () => {
-    await suite.withPage(
+    ),
+  );
+  it("downloads the original only on request when a preview is unavailable", () =>
+    suite.withPage(
       { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true },
       async ({ page }) => {
         const id = crypto.randomUUID();
         const source = `/api/chat/media/outgoing/agent%3Amain%3Amain/${id}/full`;
         const artifactId = `artifact_managed_image_${id}`;
-        const bytes = await readFile(
-          path.join(process.cwd(), "docs/assets/openclaw-banner-dark.png"),
-        );
+        const bytes = attachmentImage("original.png").buffer;
         const requests: string[] = [];
         await page.route("**/api/chat/media/outgoing/**", async (route) => {
           const variant = new URL(route.request().url()).pathname.split("/").at(-1)!;
@@ -110,14 +95,6 @@ suite.define(() => {
         const card = page.locator(".chat-image-frame--compact");
         await card.waitFor({ state: "visible" });
         expect(requests).toEqual(["thumbnail"]);
-        if (process.env.OPENCLAW_CAPTURE_UI_PROOF === "1") {
-          const frame = await takeControlUiScreenshotFrame(page, card, [card], {
-            animations: "disabled",
-          });
-          const screenshot = path.join(suite.artifactDir, "unavailable-preview.png");
-          await writeFile(screenshot, frame.png);
-          console.log(JSON.stringify({ screenshot }));
-        }
         expect(await card.getByRole("button", { name: "Image actions" }).count()).toBe(1);
         await card.getByRole("button", { name: "Image actions" }).click();
         const download = page.waitForEvent("download");
@@ -125,6 +102,5 @@ suite.define(() => {
         expect((await download).suggestedFilename()).toBe("Holiday photo.png");
         expect(requests).toEqual(["thumbnail", "full"]);
       },
-    );
-  });
+    ));
 });
