@@ -371,7 +371,7 @@ describe("session event target custody", () => {
           const scope = { agentId: "main", storePath, sessionKey, env: state.env };
           const snapshot = await loadReplySessionInitializationSnapshot(scope);
           const committed = await commitReplySessionInitialization({
-            ...eventScope,
+            ...scope,
             activeSessionKey: sessionKey,
             expectedRevision: snapshot.revision,
             sessionEntry: {
@@ -420,7 +420,7 @@ describe("session event target custody", () => {
             ? enqueueRequiredSystemEventEntry("Cancelled fresh ingress", { sessionKey })
             : undefined;
           const receipt = enqueueSessionEventForHost("Cancelled fresh ingress", {
-            ...scope,
+            ...eventScope,
             source: "plugin",
             expectedTarget: target,
             createIfMissing: true,
