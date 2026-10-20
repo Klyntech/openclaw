@@ -39,20 +39,14 @@ function readManifest(controlUi: unknown, uiCapabilities?: unknown, channels?: s
 function expectCapabilities(result: ReturnType<typeof loadPluginManifest>, expected?: unknown) {
   expect(result.ok).toBe(true);
   if (result.ok) {
-    expect([result.manifest.uiCapabilities, result.manifest.controlUi]).toEqual([
-      expected,
-      undefined,
-    ]);
+    const { uiCapabilities, controlUi } = result.manifest;
+    expect([uiCapabilities, controlUi]).toEqual([expected, undefined]);
   }
 }
 
 it("admits channel detail presentations only for the manifest's declared channels", () => {
   const view = { section: "channels", panel: "detail", channelId: "custom" };
-  const controlUi = {
-    entry,
-    activation: "settings-only",
-    settingsViews: [view],
-  };
+  const controlUi = { entry, activation: "settings-only", settingsViews: [view] };
   expect(readManifest(controlUi, undefined, ["custom"])).toMatchObject({
     ok: true,
     manifest: { controlUi },
@@ -64,13 +58,12 @@ it("admits channel detail presentations only for the manifest's declared channel
 
 it("carries normalized built entrypoints through discovery into runtime ownership", () => {
   useNoBundledPlugins();
-  const plugin = fixture(
-    {
-      entry: "./dist/control-ui/index.js",
-      styles: ["./dist/control-ui/theme.css", "dist/control-ui/theme.css"],
-    },
-    ["widget", "page", "widget"],
-  );
+  const style = "dist/control-ui/theme.css";
+  const plugin = fixture({ entry: `./${entry}`, styles: [`./${style}`, style] }, [
+    "widget",
+    "page",
+    "widget",
+  ]);
   const registry = loadOpenClawPlugins({
     cache: false,
     workspaceDir: plugin.dir,
@@ -80,7 +73,7 @@ it("carries normalized built entrypoints through discovery into runtime ownershi
   expect(registry.plugins.find((record) => record.id === plugin.id)).toMatchObject({
     status: "loaded",
     uiCapabilities: ["page", "widget"],
-    controlUi: { entry: "dist/control-ui/index.js", styles: ["dist/control-ui/theme.css"] },
+    controlUi: { entry, styles: [style] },
   });
 });
 
@@ -97,41 +90,36 @@ it.each([[["overview"]], [["memories"]], [["overview", "memories"]]])(
 );
 
 it.each([
-  [undefined, undefined],
-  [[], []],
-  [
-    ["link-reader", "page", "link-reader"],
-    ["page", "link-reader"],
-  ],
-])("reads static UI capabilities without a browser module: %j", (declaration, expected) => {
-  expectCapabilities(readManifest(undefined, declaration), expected);
+  [undefined, undefined, false],
+  [[], [], false],
+  [["link-reader", "page", "link-reader"], ["page", "link-reader"], false],
+  [null, undefined, true],
+  ["page", undefined, true],
+  [["pages"], undefined, true],
+  [["page", 1], undefined, true],
+] as const)("loads optional UI capabilities: %j", (declaration, expected, invalid) => {
+  const plugin = fixture(undefined, declaration);
+  expectCapabilities(loadPluginManifest(plugin.dir), expected);
+  if (!invalid) {
+    return;
+  }
+  const registry = loadPluginManifestRegistryCore({
+    installRecords: {},
+    candidates: [{ idHint: plugin.id, rootDir: plugin.dir, source: plugin.file, origin: "global" }],
+  });
+  expect(registry.plugins).toEqual([
+    expect.objectContaining({ id: plugin.id, uiCapabilities: undefined }),
+  ]);
+  expect(registry.diagnostics).toContainEqual(
+    expect.objectContaining({
+      level: "warn",
+      pluginId: plugin.id,
+      source: path.join(plugin.dir, "openclaw.plugin.json"),
+      message: expect.stringContaining("ignoring invalid plugin manifest uiCapabilities"),
+    }),
+  );
+  expect(registry.diagnostics.some((diagnostic) => diagnostic.level === "error")).toBe(false);
 });
-
-it.each([[null], ["page"], [["pages"]], [["page", 1]]])(
-  "ignores invalid UI metadata without hiding installed plugins: %j",
-  (declaration) => {
-    const plugin = fixture(undefined, declaration);
-    expectCapabilities(loadPluginManifest(plugin.dir));
-    const registry = loadPluginManifestRegistryCore({
-      installRecords: {},
-      candidates: [
-        { idHint: plugin.id, rootDir: plugin.dir, source: plugin.file, origin: "global" },
-      ],
-    });
-    expect(registry.plugins).toEqual([
-      expect.objectContaining({ id: plugin.id, uiCapabilities: undefined }),
-    ]);
-    expect(registry.diagnostics).toContainEqual(
-      expect.objectContaining({
-        level: "warn",
-        pluginId: plugin.id,
-        source: path.join(plugin.dir, "openclaw.plugin.json"),
-        message: expect.stringContaining("ignoring invalid plugin manifest uiCapabilities"),
-      }),
-    );
-    expect(registry.diagnostics.some((diagnostic) => diagnostic.level === "error")).toBe(false);
-  },
-);
 
 it.each([
   { activation: "settings-only" },
@@ -157,22 +145,19 @@ it.each([
   });
 });
 
-it.each([true, false])(
-  "only uses generated browser paths while a build is declared: %s",
-  (build) => {
-    const controlUi = { entry: "dist/control-ui/prebuilt/index.js" };
-    const plugin = fixture(controlUi);
-    writeJson(plugin.dir, "package.json", {
-      openclaw: { controlUi: build ? "./browser.ts" : undefined },
-    });
-    fs.mkdirSync(path.join(plugin.dir, "dist"));
-    writeJson(plugin.dir, "dist/openclaw.plugin.json", {
-      controlUi: { entry: build ? "../another-plugin/dist/control-ui/index.js" : entry },
-    });
-    expect(loadPluginManifest(plugin.dir)).toMatchObject(
-      build
-        ? { ok: false, error: expect.stringContaining("controlUi.entry") }
-        : { ok: true, manifest: { controlUi } },
-    );
-  },
-);
+it.each([true, false])("gates generated browser paths on the build: %s", (build) => {
+  const controlUi = { entry: "dist/control-ui/prebuilt/index.js" };
+  const plugin = fixture(controlUi);
+  writeJson(plugin.dir, "package.json", {
+    openclaw: { controlUi: build ? "./browser.ts" : undefined },
+  });
+  fs.mkdirSync(path.join(plugin.dir, "dist"));
+  writeJson(plugin.dir, "dist/openclaw.plugin.json", {
+    controlUi: { entry: build ? "../another-plugin/dist/control-ui/index.js" : entry },
+  });
+  expect(loadPluginManifest(plugin.dir)).toMatchObject(
+    build
+      ? { ok: false, error: expect.stringContaining("controlUi.entry") }
+      : { ok: true, manifest: { controlUi } },
+  );
+});
