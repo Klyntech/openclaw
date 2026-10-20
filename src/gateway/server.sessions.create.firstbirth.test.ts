@@ -47,20 +47,10 @@ test.for(["new database", "interrupted empty database"])(
     const agentId = scenario === "new database" ? "firstbirth-new" : "firstbirth-interrupted";
     const stateDir = resolveStateDir();
     const storePath = path.join(stateDir, "agents", agentId, "sessions", "sessions.json");
-    const configuredDatabasePath = path.join(
-      stateDir,
-      "agents",
-      agentId,
-      "agent",
-      "openclaw-agent.sqlite",
-    );
-    const databasePath = path.join(
-      await fs.realpath(stateDir),
-      "agents",
-      agentId,
-      "agent",
-      "openclaw-agent.sqlite",
-    );
+    const databaseAt = (root: string) =>
+      path.join(root, "agents", agentId, "agent", "openclaw-agent.sqlite");
+    const configuredDatabasePath = databaseAt(stateDir);
+    const databasePath = databaseAt(await fs.realpath(stateDir));
     testState.sessionStorePath = path.join(
       stateDir,
       "agents",

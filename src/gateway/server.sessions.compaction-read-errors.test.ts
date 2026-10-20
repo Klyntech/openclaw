@@ -53,6 +53,18 @@ vi.mock("../config/sessions/session-transcript-stats.js", async (importOriginal)
 
 const { createSessionStoreDir, openClient } = setupGatewaySessionsTestHarness();
 
+async function compact(key = "main", maxLines?: number) {
+  const { ws } = await openClient();
+  try {
+    return await rpcReq(ws, "sessions.compact", {
+      key,
+      ...(maxLines === undefined ? {} : { maxLines }),
+    });
+  } finally {
+    ws.close();
+  }
+}
+
 let realPrepareTranscriptHydration: PrepareTranscriptHydration;
 let realTranscriptStatsReader: ReadTranscriptStats;
 
@@ -165,21 +177,13 @@ test.each([
     await seedCompactionSession({ sessionId, storePath, nativeHarness });
     failTranscriptReadForSession(sessionId, reader);
 
-    const { ws } = await openClient();
-    try {
-      const response = await rpcReq(ws, "sessions.compact", {
-        key: "main",
-        ...(maxLines === undefined ? {} : { maxLines }),
-      });
-
-      expect(response.ok).toBe(false);
-      expect(response.error).toMatchObject({
+    expect(await compact("main", maxLines)).toMatchObject({
+      ok: false,
+      error: {
         code: "UNAVAILABLE",
         message: expect.stringContaining("failed to read session transcript storage"),
-      });
-    } finally {
-      ws.close();
-    }
+      },
+    });
   },
 );
 
@@ -194,23 +198,14 @@ test.each([false, true])(
       nativeHarness,
     });
 
-    const { ws } = await openClient();
-    try {
-      const response = await rpcReq<{ compacted: boolean; ok: true; reason: string }>(
-        ws,
-        "sessions.compact",
-        { key: "main" },
-      );
-
-      expect(response.ok).toBe(true);
-      expect(response.payload).toMatchObject({
+    expect(await compact()).toMatchObject({
+      ok: true,
+      payload: {
         ok: true,
         compacted: false,
         reason: "no transcript",
-      });
-    } finally {
-      ws.close();
-    }
+      },
+    });
   },
 );
 
@@ -218,21 +213,13 @@ test.each([undefined, 2])(
   "sessions.compact rejects a missing session with maxLines=%s",
   async (maxLines) => {
     await createSessionStoreDir();
-    const { ws } = await openClient();
-    try {
-      const response = await rpcReq(ws, "sessions.compact", {
-        key: "agent:main:missing",
-        ...(maxLines === undefined ? {} : { maxLines }),
-      });
-
-      expect(response.ok).toBe(false);
-      expect(response.error).toMatchObject({
+    expect(await compact("agent:main:missing", maxLines)).toMatchObject({
+      ok: false,
+      error: {
         code: "INVALID_REQUEST",
         message: expect.stringContaining("Session agent:main:missing not found"),
-      });
-    } finally {
-      ws.close();
-    }
+      },
+    });
   },
 );
 
@@ -265,13 +252,12 @@ test.each([false, true])(
         });
         return settled;
       });
-    embeddedRunMock.compactEmbeddedAgentSession.mockResolvedValueOnce({
-      ok: true,
-      compacted: true,
-    });
-    const { ws } = await openClient();
     try {
-      expect(await rpcReq(ws, "sessions.compact", { key: "main" })).toMatchObject({
+      embeddedRunMock.compactEmbeddedAgentSession.mockResolvedValueOnce({
+        ok: true,
+        compacted: true,
+      });
+      expect(await compact()).toMatchObject({
         ok: true,
         payload: { key: "agent:main:main", compacted: true },
       });
@@ -284,7 +270,6 @@ test.each([false, true])(
       );
     } finally {
       settlement.mockRestore();
-      ws.close();
     }
   },
 );
