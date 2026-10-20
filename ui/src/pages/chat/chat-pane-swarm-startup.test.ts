@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { createApplicationConfigCapability } from "../../app/config.ts";
 import { createApplicationPlacementStartup } from "../../app/session-placement-startup.ts";
 import { createRuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
@@ -20,32 +20,32 @@ function createGlobalPane(failMainParent = false) {
   };
   const client = createTestGatewayClient(async (method, raw) => {
     const params = asOptionalRecord(raw);
-    if (method === "models.list") {
-      return { models: [] };
+    switch (method) {
+      case "models.list":
+        return { models: [] };
+      case "agents.list":
+        return agents;
+      case "agent.identity.get":
+        return { agentId: params?.agentId, name: "Assistant" };
+      case "sessions.subscribe":
+        return { subscribed: true };
+      case "sessions.describe":
+        if (params?.key !== "global") {
+          return {};
+        }
+        parentAgents.push(params.agentId);
+        if (failMainParent && params.agentId === "main") {
+          throw new Error("temporary parent read failure");
+        }
+        return { session: null };
+      case "sessions.list":
+        if (params?.spawnedBy) {
+          childParents.push(params.spawnedBy);
+        }
+        return sessionsResult([], 1);
+      default:
+        return {};
     }
-    if (method === "agents.list") {
-      return agents;
-    }
-    if (method === "agent.identity.get") {
-      return { agentId: params?.agentId, name: "Assistant" };
-    }
-    if (method === "sessions.subscribe") {
-      return { subscribed: true };
-    }
-    if (method === "sessions.describe" && params?.key === "global") {
-      parentAgents.push(params.agentId);
-      if (failMainParent && params.agentId === "main") {
-        throw new Error("temporary parent read failure");
-      }
-      return { session: null };
-    }
-    if (method === "sessions.list") {
-      if (params?.spawnedBy) {
-        childParents.push(params.spawnedBy);
-      }
-      return sessionsResult([], 1);
-    }
-    return {};
   });
   const { pane, state } = createTestChatPane({ client });
   state.sessionKey = "global";
@@ -68,62 +68,59 @@ function createGlobalPane(failMainParent = false) {
     },
   };
   const coordinator = pane.context.connectionBootstrap;
-  return { pane, state, snapshot, coordinator, parentAgents, childParents };
+  return { pane, snapshot, coordinator, parentAgents, childParents };
 }
 
-describe("global pane Swarm startup ownership", () => {
-  it.each([
-    { phase: "connect", transition: "snapshot" },
-    { phase: "retry", transition: "snapshot" },
-    { phase: "connect", transition: "selection" },
-    { phase: "retry", transition: "selection" },
-  ] as const)(
-    "retires an old global agent's pending $phase during $transition while the next foreground chat holds hydration",
-    async ({ phase, transition }) => {
-      vi.useFakeTimers();
-      const { pane, snapshot, coordinator, parentAgents, childParents } = createGlobalPane(
-        phase === "retry",
-      );
-      try {
-        pane.applyGatewaySnapshot(snapshot);
-        if (transition === "selection") {
-          const runtimeConfig = createRuntimeConfigCapability(pane.context.gateway);
-          const placementStartup = createApplicationPlacementStartup(pane.context);
-          Object.assign(pane.context, {
-            config: createApplicationConfigCapability({ resourceBasePath: "" }),
-            runtimeConfig,
-            placementStartup,
-          });
-          onTestFinished(() => {
-            runtimeConfig.dispose();
-            placementStartup.dispose();
-          });
-          pane.connectedCallback();
-        }
-        await import("../../lib/sessions/swarm-roster.ts");
-        await vi.dynamicImportSettled();
-        if (phase === "retry") {
-          await vi.waitFor(() => expect(parentAgents).toEqual(["main"]));
-          parentAgents.length = 0;
-          childParents.length = 0;
-        }
-
-        coordinator.setForegroundRoute(undefined);
-        pane.context.agentSelection.set("research");
-        if (transition === "snapshot") {
-          pane.applyGatewaySnapshot(snapshot);
-        }
-        await vi.advanceTimersByTimeAsync(1_000);
-        expect(parentAgents).toEqual([]);
-        expect(childParents).toEqual([]);
-
-        coordinator.setForegroundRoute(null);
-        await vi.waitFor(() => expect(parentAgents).toEqual(["research"]));
-        expect(childParents).toEqual(["global"]);
-      } finally {
-        coordinator.reset();
-        vi.useRealTimers();
+it.each([
+  { phase: "connect", transition: "snapshot" },
+  { phase: "retry", transition: "snapshot" },
+  { phase: "connect", transition: "selection" },
+  { phase: "retry", transition: "selection" },
+] as const)(
+  "retires an old global agent's pending $phase during $transition while the next foreground chat holds hydration",
+  async ({ phase, transition }) => {
+    vi.useFakeTimers();
+    const { pane, snapshot, coordinator, parentAgents, childParents } = createGlobalPane(
+      phase === "retry",
+    );
+    try {
+      pane.applyGatewaySnapshot(snapshot);
+      if (transition === "selection") {
+        const runtimeConfig = createRuntimeConfigCapability(pane.context.gateway);
+        const placementStartup = createApplicationPlacementStartup(pane.context);
+        Object.assign(pane.context, {
+          config: createApplicationConfigCapability({ resourceBasePath: "" }),
+          runtimeConfig,
+          placementStartup,
+        });
+        onTestFinished(() => {
+          runtimeConfig.dispose();
+          placementStartup.dispose();
+        });
+        pane.connectedCallback();
       }
-    },
-  );
-});
+      await import("../../lib/sessions/swarm-roster.ts");
+      await vi.dynamicImportSettled();
+      if (phase === "retry") {
+        await vi.waitFor(() => expect(parentAgents).toEqual(["main"]));
+        parentAgents.length = 0;
+        childParents.length = 0;
+      }
+
+      coordinator.setForegroundRoute(undefined);
+      pane.context.agentSelection.set("research");
+      if (transition === "snapshot") {
+        pane.applyGatewaySnapshot(snapshot);
+      }
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect({ parentAgents, childParents }).toEqual({ parentAgents: [], childParents: [] });
+
+      coordinator.setForegroundRoute(null);
+      await vi.waitFor(() => expect(parentAgents).toEqual(["research"]));
+      expect(childParents).toEqual(["global"]);
+    } finally {
+      coordinator.reset();
+      vi.useRealTimers();
+    }
+  },
+);
