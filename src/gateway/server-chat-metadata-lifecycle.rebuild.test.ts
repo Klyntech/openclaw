@@ -17,7 +17,7 @@ import type { GatewayRequestContext } from "./server-methods/types.js";
 import { createGatewaySidecarStopOwner } from "./server-sidecar-owners.js";
 
 const mocks = getPreparedModelRuntimeMocks();
-const config = {
+const config: OpenClawConfig = {
   agents: {
     defaults: {
       model: { primary: "openai/gpt-5.4" },
@@ -26,7 +26,7 @@ const config = {
     },
     entries: { main: {} },
   },
-} as OpenClawConfig;
+};
 const publishOwner = () =>
   refreshPreparedModelRuntimeSnapshots(config, {
     gatewayLifecycle: true,

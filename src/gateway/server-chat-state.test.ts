@@ -12,16 +12,29 @@ const resultMetadata = { phase: "result", toolCallId: "done", name: "read" };
 function progressHarness(mode?: ReplayMode, timeOffset = 0, sessionKey?: string) {
   const state = createChatRunState();
   const context = { runId: "run-1", ...(sessionKey ? { sessionKey } : {}) };
+  const wire = (seq: number, stream: string, data: Record<string, unknown>) => ({
+    ...context,
+    seq,
+    stream,
+    ts: timeOffset + seq,
+    data,
+  });
   const event = (seq: number, stream: string, data: Record<string, unknown>) =>
-    state.recordProgressEvent(
-      context.runId,
-      { ...context, seq, stream, ts: timeOffset + seq, data },
-      mode,
-    );
+    state.recordProgressEvent(context.runId, wire(seq, stream, data), mode);
   const snapshot = () => state.runs.get("run-1")?.progressSnapshot;
   let seq = 0;
   const send = (stream: string, data: Record<string, unknown>) => event(++seq, stream, data);
-  return { state, event, send, snapshot, events: () => snapshot()?.events };
+  return { state, wire, event, send, snapshot, events: () => snapshot()?.events };
+}
+
+function withUnreadTail(field: string, value: unknown, onRead: () => void) {
+  return {
+    [field]: value,
+    get later() {
+      onRead();
+      return "unused";
+    },
+  };
 }
 
 function mockClock(now: number) {
@@ -89,39 +102,36 @@ describe("createChatRunState", () => {
     { finalized: true, keepState: false },
     { finalized: true, keepState: true },
     { finalized: false, keepState: false },
-  ])(
-    "expires recipients without dropping active runs or other state: %j",
-    ({ finalized, keepState }) => {
-      const clock = mockClock(1_000);
-      const state = createChatRunState();
-      state.toolEventRecipients.add("expired", "conn-expired");
-      state.toolEventRecipients.add("active", "conn-active");
-      if (keepState) {
-        state.getOrCreate("expired").buffer = "retained";
-      }
-      if (finalized) {
-        state.toolEventRecipients.markFinal("expired");
-      } else {
-        clock.now = 301_000;
-        expect(state.toolEventRecipients.get("active")).toEqual(new Set(["conn-active"]));
-      }
-      clock.now = 1_000 + (finalized ? 30_000 : 600_000) - 1;
-      if (finalized) {
-        expect(state.toolEventRecipients.get("expired")).toEqual(new Set(["conn-expired"]));
-      } else {
-        state.toolEventRecipients.get("active");
-        expect(state.runs.has("expired")).toBe(true);
-      }
-      clock.now += 1;
-      if (!finalized) {
-        state.toolEventRecipients.get("active");
-      }
-      expect(state.toolEventRecipients.get("expired")).toBeUndefined();
-      expect(state.toolEventRecipients.get("expired")).toBeUndefined();
+  ])("expires recipients but retains active runs/state: %j", ({ finalized, keepState }) => {
+    const clock = mockClock(1_000);
+    const state = createChatRunState();
+    state.toolEventRecipients.add("expired", "conn-expired");
+    state.toolEventRecipients.add("active", "conn-active");
+    if (keepState) {
+      state.getOrCreate("expired").buffer = "retained";
+    }
+    if (finalized) {
+      state.toolEventRecipients.markFinal("expired");
+    } else {
+      clock.now = 301_000;
       expect(state.toolEventRecipients.get("active")).toEqual(new Set(["conn-active"]));
-      expect(state.runs.has("expired")).toBe(keepState);
-    },
-  );
+    }
+    clock.now = 1_000 + (finalized ? 30_000 : 600_000) - 1;
+    if (finalized) {
+      expect(state.toolEventRecipients.get("expired")).toEqual(new Set(["conn-expired"]));
+    } else {
+      state.toolEventRecipients.get("active");
+      expect(state.runs.has("expired")).toBe(true);
+    }
+    clock.now += 1;
+    if (!finalized) {
+      state.toolEventRecipients.get("active");
+    }
+    expect(state.toolEventRecipients.get("expired")).toBeUndefined();
+    expect(state.toolEventRecipients.get("expired")).toBeUndefined();
+    expect(state.toolEventRecipients.get("active")).toEqual(new Set(["conn-active"]));
+    expect(state.runs.has("expired")).toBe(keepState);
+  });
 
   it.each([false, true])(
     "expires new recipients after clock rollback (clear previous state: %s)",
@@ -143,7 +153,7 @@ describe("createChatRunState", () => {
     },
   );
 
-  it("clears transient projection state without dropping run ownership or abort tombstones", () => {
+  it("clears projections but retains ownership and abort tombstones", () => {
     const { state, event } = progressHarness();
     state.registry.add("run-1", { sessionKey: "session-1", clientRunId: "client-1" });
     state.toolEventRecipients.add("run-1", "conn-1");
@@ -181,7 +191,7 @@ describe("createChatRunState", () => {
   it.each(["full", "summary"] as const)(
     "retains the latest usage through %s reconnect eviction",
     (mode) => {
-      const { state, event, snapshot: getSnapshot } = progressHarness(mode);
+      const { state, wire, event, snapshot: getSnapshot } = progressHarness(mode);
       event(1, "usage", { outputTokens: 100 });
       event(2, "usage", { outputTokens: 170 });
       event(1, "usage", { outputTokens: 100 });
@@ -191,15 +201,7 @@ describe("createChatRunState", () => {
       }
       const snapshot = getSnapshot();
       const usage = snapshot?.events.filter((candidate) => candidate.stream === "usage");
-      expect(usage).toEqual([
-        {
-          runId: "run-1",
-          seq: 3,
-          stream: "usage",
-          ts: 3,
-          data: { outputTokens: 170, activeContextTokens: 900 },
-        },
-      ]);
+      expect(usage).toEqual([wire(3, "usage", { outputTokens: 170, activeContextTokens: 900 })]);
       expect(snapshot?.events).toHaveLength(50);
       expect(snapshot?.byteLength).toBeLessThanOrEqual(128 * 1024);
       state.clearRun("run-1");
@@ -251,59 +253,47 @@ describe("createChatRunState", () => {
     expect(events()).toMatchObject([{ stream: "assistant", seq: 2 }]);
   });
 
-  it.each(["full", "summary"] as const)(
-    "retains retry waits after completed work and clears them on resumed %s activity",
-    (mode) => {
-      const { send, events } = progressHarness(mode);
-      let seq = 1;
-      send("tool", { phase: "result", toolCallId: "read-1", name: "read", result: "done" });
-      for (const stream of ["assistant", "tool", "item"]) {
-        const retry = {
-          phase: "retrying",
-          message: "Rate limited. Retrying in 2 seconds (attempt 2/8).",
-          retryAttempt: 2,
-          maxRetries: 8,
-          delayMs: 2_000,
-          retryAt: 1_800_000_002_000,
-        };
-        send("run_status", retry);
-        send("usage", { outputTokens: 100 });
-        expect(events()).toContainEqual(
-          expect.objectContaining({ stream: "run_status", data: retry }),
-        );
-        send(
-          stream,
-          stream === "assistant"
-            ? { text: "Continuing" }
-            : stream === "tool"
-              ? { phase: "start", toolCallId: "read-2", name: "read" }
-              : { kind: "preamble", itemId: "resumed", progressText: "Continuing" },
-        );
-        seq += 3;
-        expect(events()?.some((entry) => entry.stream === "run_status")).toBe(false);
-        if (stream === "assistant") {
-          expect(events()).toContainEqual({
-            runId: "run-1",
-            seq,
-            stream: "assistant",
-            ts: seq,
-            data: {},
-          });
-        }
-        expect(events()).toContainEqual(
-          expect.objectContaining({
-            stream: "tool",
-            data: expect.objectContaining({ toolCallId: "read-1", phase: "result" }),
-          }),
-        );
+  it.each(["full", "summary"] as const)("retains retry waits until resumed %s activity", (mode) => {
+    const { wire, send, events } = progressHarness(mode);
+    let seq = 1;
+    send("tool", { phase: "result", toolCallId: "read-1", name: "read", result: "done" });
+    for (const [stream, data] of [
+      ["assistant", { text: "Continuing" }],
+      ["tool", { phase: "start", toolCallId: "read-2", name: "read" }],
+      ["item", { kind: "preamble", itemId: "resumed", progressText: "Continuing" }],
+    ] as const) {
+      const retry = {
+        phase: "retrying",
+        message: "Rate limited. Retrying in 2 seconds (attempt 2/8).",
+        retryAttempt: 2,
+        maxRetries: 8,
+        delayMs: 2_000,
+        retryAt: 1_800_000_002_000,
+      };
+      send("run_status", retry);
+      send("usage", { outputTokens: 100 });
+      expect(events()).toContainEqual(
+        expect.objectContaining({ stream: "run_status", data: retry }),
+      );
+      send(stream, data);
+      seq += 3;
+      expect(events()?.some((entry) => entry.stream === "run_status")).toBe(false);
+      if (stream === "assistant") {
+        expect(events()).toContainEqual(wire(seq, "assistant", {}));
       }
-    },
-  );
+      expect(events()).toContainEqual(
+        expect.objectContaining({
+          stream: "tool",
+          data: expect.objectContaining({ toolCallId: "read-1", phase: "result" }),
+        }),
+      );
+    }
+  });
 
   it.each(["full", "summary"] as const)(
     "retains permission notices for %s reconnect history",
     (mode) => {
-      const state = createChatRunState();
+      const { wire, event, events } = progressHarness(mode, 999, "main");
       const data = {
         phase: "warning",
         kind: "permission_missing",
@@ -314,20 +304,12 @@ describe("createChatRunState", () => {
           state: "not-determined",
         },
       };
-      const event = {
-        runId: "run-permission",
-        seq: 1,
-        stream: "notice",
-        ts: 1_000,
-        sessionKey: "main",
-        data,
-      };
-      state.recordProgressEvent("run-permission", event, mode);
-      expect(state.runs.get("run-permission")?.progressSnapshot?.events).toEqual([event]);
+      event(1, "notice", data);
+      expect(events()).toEqual([wire(1, "notice", data)]);
     },
   );
 
-  it("keeps completed owners and standalone notices reconstructable until bounded eviction", () => {
+  it("replays completed owners and standalone notices until bounded eviction", () => {
     const { event, events, snapshot: getSnapshot } = progressHarness(undefined, 1_000, "main");
     const tool = (
       seq: number,
@@ -420,7 +402,7 @@ describe("createChatRunState", () => {
     });
   });
 
-  it("captures native tool JSON once with frozen wire values and exact byte accounting", () => {
+  it("captures native JSON once, frozen and byte-exact", () => {
     const { event, snapshot: getSnapshot } = progressHarness();
     let serializations = 0;
     let reads = 0;
@@ -477,9 +459,11 @@ describe("createChatRunState", () => {
     const captured = snapshot!.events[0]!.data.result as {
       details: { text: string; values: null[] };
     };
-    expect(Reflect.set(captured, "details", {})).toBe(false);
-    expect(Reflect.set(captured.details, "text", "changed")).toBe(false);
-    expect(Reflect.set(captured.details.values, "0", "changed")).toBe(false);
+    expect([
+      Reflect.set(captured, "details", {}),
+      Reflect.set(captured.details, "text", "changed"),
+      Reflect.set(captured.details.values, "0", "changed"),
+    ]).toEqual([false, false, false]);
     expect(snapshot?.byteLength).toBe(
       snapshot?.events.reduce((sum, entry) => sum + jsonBytes(entry), 0),
     );
@@ -516,22 +500,16 @@ describe("createChatRunState", () => {
     expect(state.runs.get("run-1")?.progressSnapshot?.events[0]?.data.result).toEqual({
       [field]: text,
     });
-    let laterReads = 0;
+    const laterRead = vi.fn();
     state.recordProgressEvent("run-1", {
       ...event,
       seq: 2,
       data: {
         ...metadata,
-        result: {
-          [field]: encode(`${text}x`),
-          get later() {
-            laterReads += 1;
-            return "unused";
-          },
-        },
+        result: withUnreadTail(field, encode(`${text}x`), laterRead),
       },
     });
-    expect(laterReads).toBe(0);
+    expect(laterRead).not.toHaveBeenCalled();
     expect(state.runs.get("run-1")?.progressSnapshot?.events[0]?.data).toEqual(metadata);
   });
 
@@ -565,28 +543,20 @@ describe("createChatRunState", () => {
     "retains metadata without reading beyond a %s result",
     (_label, result, field) => {
       const { event, snapshot: getSnapshot } = progressHarness();
-      let laterReads = 0;
+      const laterRead = vi.fn();
       const value = result();
       event(1, "tool", {
         ...resultMetadata,
-        result: field
-          ? {
-              [field]: value,
-              get later() {
-                laterReads += 1;
-                return "unused";
-              },
-            }
-          : value,
+        result: field ? withUnreadTail(field, value, laterRead) : value,
       });
-      expect(laterReads).toBe(0);
+      expect(laterRead).not.toHaveBeenCalled();
       const snapshot = getSnapshot();
       expect(snapshot?.events[0]?.data).toEqual(resultMetadata);
       expect(snapshot?.byteLength).toBe(jsonBytes(snapshot?.events[0]));
     },
   );
 
-  it("keeps a review-heavy reconnect bounded, adverse, and attached to its owner", () => {
+  it("bounds review-heavy reconnects with adverse outcomes attached to owners", () => {
     const { event: record, events: getEvents } = progressHarness(undefined, 1_000);
     const event = (seq: number, data: Record<string, unknown>) => record(seq, "tool", data);
     event(1, {
@@ -670,7 +640,7 @@ describe("createSessionMessageSubscriberRegistry", () => {
     { mode: undefined, includeApprovals: false, changeMode: false },
     { mode: undefined, includeApprovals: true, changeMode: false },
   ] as const)(
-    "restores committed intent after replay failure: %j",
+    "restores intent after replay failure: %j",
     ({ mode, includeApprovals, changeMode }) => {
       const { registry: subscribers, subscribe, snapshot } = subscriptionHarness();
       const onChange = vi.fn();
@@ -703,66 +673,60 @@ describe("createSessionMessageSubscriberRegistry", () => {
     { action: "disconnect", subscriptionId: undefined },
     { action: "unsubscribe", subscriptionId: "owner" },
     { action: "disconnect", subscriptionId: "owner" },
-  ])(
-    "fences pending settlements after invalidation and ID reuse: %j",
-    ({ action, subscriptionId }) => {
-      const { registry: subscribers, subscribe, snapshot } = subscriptionHarness();
-      const old = subscribe({
-        subscriptionId,
-        provisional: true,
-        includeApprovals: true,
-        mode: subscriptionId ? undefined : "narration",
-      })!;
-      if (action === "disconnect") {
-        subscribers.unsubscribeAll("conn");
-      } else {
-        subscribers.unsubscribe("conn", key, subscriptionId);
-      }
-      expect(snapshot()).toEqual([[], [], []]);
-      const replacement = subscribe({
-        subscriptionId,
-        provisional: !subscriptionId,
-        mode: subscriptionId ? "narration" : undefined,
-      });
-      old.commit();
-      expect(snapshot()).toEqual([["conn"], [], subscriptionId ? ["conn"] : []]);
-      if (replacement) {
-        replacement();
-      } else {
-        subscribe({ subscriptionId: "another" });
-        subscribers.unsubscribeAll("conn");
-      }
-      expect(snapshot()).toEqual([[], [], []]);
-    },
-  );
+  ])("fences settlement after invalidation and ID reuse: %j", ({ action, subscriptionId }) => {
+    const { registry: subscribers, subscribe, snapshot } = subscriptionHarness();
+    const old = subscribe({
+      subscriptionId,
+      provisional: true,
+      includeApprovals: true,
+      mode: subscriptionId ? undefined : "narration",
+    })!;
+    if (action === "disconnect") {
+      subscribers.unsubscribeAll("conn");
+    } else {
+      subscribers.unsubscribe("conn", key, subscriptionId);
+    }
+    expect(snapshot()).toEqual([[], [], []]);
+    const replacement = subscribe({
+      subscriptionId,
+      provisional: !subscriptionId,
+      mode: subscriptionId ? "narration" : undefined,
+    });
+    old.commit();
+    expect(snapshot()).toEqual([["conn"], [], subscriptionId ? ["conn"] : []]);
+    if (replacement) {
+      replacement();
+    } else {
+      subscribe({ subscriptionId: "another" });
+      subscribers.unsubscribeAll("conn");
+    }
+    expect(snapshot()).toEqual([[], [], []]);
+  });
   it.each([
     { separateOwners: true, succeeds: false },
     { separateOwners: false, succeeds: false },
     { separateOwners: false, succeeds: true },
-  ])(
-    "retains foreground delivery until pending ownership settles: %j",
-    ({ separateOwners, succeeds }) => {
-      const { subscribe, snapshot } = subscriptionHarness();
-      const foregroundId = separateOwners ? "foreground" : "owner";
-      const narrationId = separateOwners ? "sidebar" : "owner";
-      if (separateOwners) {
-        subscribe({ subscriptionId: narrationId, mode: "narration" });
-      }
-      const foreground = subscribe({
-        subscriptionId: foregroundId,
-        provisional: true,
-        includeApprovals: separateOwners,
-      })!;
-      const narration = subscribe({
-        subscriptionId: narrationId,
-        provisional: true,
-        mode: "narration",
-      })!;
-      expect(snapshot().slice(1)).toEqual([separateOwners ? ["conn"] : [], []]);
-      (separateOwners ? narration : narration.commit)();
-      expect(snapshot().slice(1)).toEqual([separateOwners ? ["conn"] : [], []]);
-      (succeeds ? foreground.commit : foreground)();
-      expect(snapshot().slice(1)).toEqual([[], ["conn"]]);
-    },
-  );
+  ])("retains foreground until ownership settles: %j", ({ separateOwners, succeeds }) => {
+    const { subscribe, snapshot } = subscriptionHarness();
+    const foregroundId = separateOwners ? "foreground" : "owner";
+    const narrationId = separateOwners ? "sidebar" : "owner";
+    if (separateOwners) {
+      subscribe({ subscriptionId: narrationId, mode: "narration" });
+    }
+    const foreground = subscribe({
+      subscriptionId: foregroundId,
+      provisional: true,
+      includeApprovals: separateOwners,
+    })!;
+    const narration = subscribe({
+      subscriptionId: narrationId,
+      provisional: true,
+      mode: "narration",
+    })!;
+    expect(snapshot().slice(1)).toEqual([separateOwners ? ["conn"] : [], []]);
+    (separateOwners ? narration : narration.commit)();
+    expect(snapshot().slice(1)).toEqual([separateOwners ? ["conn"] : [], []]);
+    (succeeds ? foreground.commit : foreground)();
+    expect(snapshot().slice(1)).toEqual([[], ["conn"]]);
+  });
 });

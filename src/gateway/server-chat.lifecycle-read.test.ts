@@ -72,77 +72,70 @@ function event(phase: "start" | "end", seq = 1): AgentEventRuntimePayload {
   };
 }
 
-it("reads lifecycle recovery in workers and retains tool/text order through close", async () => {
+it.each(["close", "queued recovery"])("orders worker recovery through %s", async (mode) => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    seedSession(env);
-    await sessionReader.loadGatewaySessionEntryReadOnlyInWorker({ cfg: config, key: sessionKey });
-    const { release, entered, held } = holdRecoveryRead();
+    if (mode === "queued recovery") {
+      setRuntimeConfigSnapshot(config);
+    }
+    const target = seedSession(env);
+    if (mode === "close") {
+      await sessionReader.loadGatewaySessionEntryReadOnlyInWorker({ cfg: config, key: sessionKey });
+    }
+    const { release, entered, held } = holdRecoveryRead(mode === "queued recovery");
     const h = registeredHarness();
-    h.toolEventRecipients.add("worker-lifecycle", "tool-client");
-    const sql = observeHostDataSql();
+    if (mode === "close") {
+      h.toolEventRecipients.add("worker-lifecycle", "tool-client");
+    }
+    const sql = mode === "close" ? observeHostDataSql() : undefined;
     let closing: Promise<void> | undefined;
     try {
       const starting = h.handler(event("start"));
-      expect(
-        sql.queries.filter((query) => /\bfrom\s+"?session_(?:nodes|participants)\b/i.test(query)),
-      ).toEqual([]);
-      await entered.promise;
-      const tool = h.send("tool", { phase: "start", name: "read" }, 2);
-      const text = h.send("assistant", { text: "Complete reply" }, 3);
-      const terminal = h.handler(event("end", 4));
-      let closed = false;
-      closing = h.handler.dispose().then(() => {
-        closed = true;
-      });
-      const refused = h.send("assistant", { text: "Refused" }, 1, { runId: "late-new-run" });
-      expect(closed).toBe(false);
-      release.resolve();
-      await Promise.all([starting, tool, text, terminal, closing, refused]);
-      expect(sql.queries).toEqual([]);
-      expect(h.agent().map(([, payload]) => payload.seq)).toEqual([1, 3, 4]);
-      expect(h.targetedAgent().map(([, payload]) => payload.seq)).toEqual([2]);
-      expect(h.chat().at(-1)?.[1]).toMatchObject({
-        state: "final",
-        message: { content: [{ type: "text", text: "Complete reply" }] },
-      });
+      if (sql) {
+        expect(
+          sql.queries.filter((query) => /\bfrom\s+"?session_(?:nodes|participants)\b/i.test(query)),
+        ).toEqual([]);
+        await entered.promise;
+        const tool = h.send("tool", { phase: "start", name: "read" }, 2);
+        const text = h.send("assistant", { text: "Complete reply" }, 3);
+        const terminal = h.handler(event("end", 4));
+        let closed = false;
+        closing = h.handler.dispose().then(() => {
+          closed = true;
+        });
+        const refused = h.send("assistant", { text: "Refused" }, 1, { runId: "late-new-run" });
+        expect(closed).toBe(false);
+        release.resolve();
+        await Promise.all([starting, tool, text, terminal, closing, refused]);
+        expect(sql.queries).toEqual([]);
+        expect(h.agent().map(([, payload]) => payload.seq)).toEqual([1, 3, 4]);
+        expect(h.targetedAgent().map(([, payload]) => payload.seq)).toEqual([2]);
+        expect(h.chat().at(-1)?.[1]).toMatchObject({
+          state: "final",
+          message: { content: [{ type: "text", text: "Complete reply" }] },
+        });
+      } else {
+        await awaitGateBeforeSettlement(
+          entered.promise,
+          Promise.resolve(starting),
+          "recovery did not start",
+        );
+        const queued = h.handler({ ...event("start", 2), lifecycleGeneration: "pre-restart" });
+        await replaceSessionEntry(target, {
+          sessionId,
+          updatedAt: 2_000,
+          abortedLastRun: true,
+          restartRecoveryRuns: [{ runId: "worker-lifecycle", lifecycleGeneration: "pre-restart" }],
+        });
+        release.resolve();
+        await Promise.all([starting, queued]);
+        expect(h.agent().map(([, payload]) => payload.seq)).toEqual([1]);
+        expect(held).toHaveBeenCalledTimes(2);
+      }
     } finally {
       release.resolve();
       await closing;
       await h.handler.dispose();
-      sql.restore();
-      held.mockRestore();
-      h.chatRunState.clear();
-    }
-  });
-});
-
-it("reads queued recovery state once after the preceding event settles", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    setRuntimeConfigSnapshot(config);
-    const target = seedSession(env);
-    const { release, entered, held } = holdRecoveryRead(true);
-    const h = registeredHarness();
-    try {
-      const first = h.handler(event("start"));
-      await awaitGateBeforeSettlement(
-        entered.promise,
-        Promise.resolve(first),
-        "recovery did not start",
-      );
-      const queued = h.handler({ ...event("start", 2), lifecycleGeneration: "pre-restart" });
-      await replaceSessionEntry(target, {
-        sessionId,
-        updatedAt: 2_000,
-        abortedLastRun: true,
-        restartRecoveryRuns: [{ runId: "worker-lifecycle", lifecycleGeneration: "pre-restart" }],
-      });
-      release.resolve();
-      await Promise.all([first, queued]);
-      expect(h.agent().map(([, payload]) => payload.seq)).toEqual([1]);
-      expect(held).toHaveBeenCalledTimes(2);
-    } finally {
-      release.resolve();
-      await h.handler.dispose();
+      sql?.restore();
       held.mockRestore();
       h.chatRunState.clear();
     }
