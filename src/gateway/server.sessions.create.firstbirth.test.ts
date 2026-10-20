@@ -172,10 +172,7 @@ test.for(["new database", "interrupted empty database"])(
       expect(observed.candidates).toEqual([
         { path: configuredDatabasePath, physicalPath: databasePath },
       ]);
-      expect(result).toMatchObject({
-        ok: true,
-        payload: { key, sessionId: expect.any(String) },
-      });
+      expect(result).toMatchObject({ ok: true, payload: { key, sessionId: expect.any(String) } });
       expect(observed.dispatched, "Discovery must wait for the canonical agent schema").toBe(0);
       expect(result.payload?.sessionId).toBeTruthy();
       const entry = await readSessionEntryReadOnlyInWorker({

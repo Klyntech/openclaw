@@ -7,7 +7,6 @@ import {
 } from "../../test/helpers/promise.js";
 import type { AgentCommandOpts } from "../agents/command/types.js";
 import { SessionFollowupCompletion } from "../agents/subagents/completion/session-followup-completion.js";
-import type { FollowupRequest } from "../agents/subagents/completion/session-followup-completion.types.js";
 import { startSessionsSendReplyFlow } from "../agents/tools/sessions-send-reply-flow.js";
 import { withPluginRuntimeGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
 import { getRpcSource } from "../sessions/session-controller.rpc-sources.js";
@@ -81,7 +80,7 @@ export function registerSessionsSendPrivateCompletionTests(
       const source = new AbortController();
       const closed = createDeferred<Record<"completions" | "pending", Record<string, unknown>[]>>();
       let completionWork: Promise<unknown> | undefined;
-      const followup: FollowupRequest = {
+      const completion = SessionFollowupCompletion.bind({
         runId: childRunId,
         requesterAgentId: "main",
         requesterSessionKey: sessionKey,
@@ -101,8 +100,7 @@ export function registerSessionsSendPrivateCompletionTests(
             return result;
           },
         },
-      };
-      const completion = SessionFollowupCompletion.bind(followup);
+      });
       const close = vi.spyOn(completion, "close");
       completion.markAccepted(childRunId);
       await completion.settle(childRunId, {
@@ -137,8 +135,9 @@ export function registerSessionsSendPrivateCompletionTests(
         requesterAgentId: "main",
         requesterSession: { sessionId },
       });
-      const work = expectDefined(completionWork, "Expected retained completion work");
-      const finished = work.catch(() => undefined);
+      const finished = expectDefined(completionWork, "Expected retained completion work").catch(
+        () => undefined,
+      );
       try {
         await withinTest(
           awaitGateBeforeSettlement(

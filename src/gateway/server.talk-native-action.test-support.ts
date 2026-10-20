@@ -35,20 +35,16 @@ export async function runTalkNativeActionParity(fixture: {
   waitForDispatchEnd: () => Promise<void>;
 }) {
   const { context, client, agentId, sessionKey, runEmbeddedAgent, waitForDispatchEnd } = fixture;
+  const { canonicalKey, sessionId: parentSessionId, storePath } = fixture;
   const config = getRuntimeConfig();
   await prepareGatewayReplyRuntimeForTest({
     force: true,
     config: { ...config, tools: { ...config.tools, exec: { host: "gateway", mode: "full" } } },
   });
   await replaceSessionEntry(
+    { agentId, sessionKey: canonicalKey, sessionId: parentSessionId, storePath },
     {
-      agentId,
-      sessionKey: fixture.canonicalKey,
-      sessionId: fixture.sessionId,
-      storePath: fixture.storePath,
-    },
-    {
-      sessionId: fixture.sessionId,
+      sessionId: parentSessionId,
       updatedAt: Date.now(),
       permissionMode: "full",
       execHost: "gateway",

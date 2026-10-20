@@ -19,6 +19,7 @@ import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import { makeProviderModelFixture } from "../agents/test-helpers/provider-model-fixture.js";
 import { getRuntimeConfig, writeConfigFile } from "../config/config.js";
 import { loadSessionEntry, updateSessionEntry } from "../config/sessions/session-accessor.js";
 import { isMissingPathError } from "../infra/errors.js";
@@ -76,6 +77,14 @@ it.for(["allowed", "revoked"] as const)(
       compaction: { enabled: false },
     };
     const config = getRuntimeConfig();
+    const { api, baseUrl, provider, ...model } = makeProviderModelFixture<"openai-responses">({
+      id: "mock-1",
+      name: "Peer recovery fixture",
+      provider: "peer-fixture",
+      api: "openai-responses",
+      baseUrl: "https://peer-recovery.example.test/v1",
+      maxTokens: 2_048,
+    });
     await writeConfigFile({
       ...config,
       session: {
@@ -87,21 +96,11 @@ it.for(["allowed", "revoked"] as const)(
       plugins: { ...config.plugins, enabled: false },
       models: {
         providers: {
-          "peer-fixture": {
-            api: "openai-responses",
+          [provider]: {
+            api,
             apiKey: "synthetic-peer-recovery-key",
-            baseUrl: "https://peer-recovery.example.test/v1",
-            models: [
-              {
-                id: "mock-1",
-                name: "Peer recovery fixture",
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 16_000,
-                maxTokens: 2_048,
-              },
-            ],
+            baseUrl,
+            models: [model],
           },
         },
       },
@@ -195,14 +194,9 @@ it.for(["allowed", "revoked"] as const)(
       ...actualRuntime,
       dispatchAgent: async <T>(...args: Parameters<GatewayRecoveryRuntime["dispatchAgent"]>) => {
         didDispatch = true;
-        try {
-          const result = await actualRuntime.dispatchAgent<T>(...args);
-          dispatchFinished.resolve(result);
-          return result;
-        } catch (error) {
-          dispatchFinished.reject(error);
-          throw error;
-        }
+        const dispatched = actualRuntime.dispatchAgent<T>(...args);
+        void dispatched.then(dispatchFinished.resolve, dispatchFinished.reject);
+        return dispatched;
       },
     };
     const recovery = recoverStore({

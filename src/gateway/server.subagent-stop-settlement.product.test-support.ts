@@ -10,6 +10,7 @@ import type {
   EmbeddedAgentRunResult,
   runEmbeddedAgent as runEmbeddedAgentType,
 } from "../agents/embedded-agent.js";
+import { makeProviderModelFixture } from "../agents/test-helpers/provider-model-fixture.js";
 import {
   createAdmittedGatewayToolCallerIdentity,
   withGatewayToolCallerIdentity,
@@ -32,6 +33,7 @@ export const completedEmbeddedRun: EmbeddedAgentRunResult = {
 };
 
 const proxyUser = "subagent-stop-administrator@example.test";
+const operatorScopes = ["operator.admin", "operator.read", "operator.write"];
 export const subagentStopProxyHeaders = {
   "x-forwarded-for": "203.0.113.81",
   "x-forwarded-proto": "https",
@@ -42,15 +44,21 @@ export function buildSubagentStopConfig(
   workspace: string,
   tls: { certPath: string; keyPath: string },
 ): OpenClawConfig {
+  const { api, baseUrl, provider, ...model } = makeProviderModelFixture<"openai-responses">({
+    id: "stop-proof",
+    name: "Stop proof",
+    provider: "synthetic",
+    api: "openai-responses",
+    baseUrl: "https://example.invalid/v1",
+    contextWindow: 4096,
+    maxTokens: 1024,
+  });
   const trustedProxy = {
     userHeader: "x-forwarded-user",
     requiredHeaders: ["x-forwarded-proto"],
     allowUsers: [proxyUser],
     allowLoopback: true,
-    deviceAutoApprove: {
-      enabled: true,
-      scopes: ["operator.admin", "operator.read", "operator.write"],
-    },
+    deviceAutoApprove: { enabled: true, scopes: [...operatorScopes] },
   };
   return {
     agents: {
@@ -65,21 +73,11 @@ export function buildSubagentStopConfig(
     models: {
       mode: "replace",
       providers: {
-        synthetic: {
-          api: "openai-responses",
-          baseUrl: "https://example.invalid/v1",
+        [provider]: {
+          api,
+          baseUrl,
           apiKey: "synthetic-test-key",
-          models: [
-            {
-              id: "stop-proof",
-              name: "Stop proof",
-              reasoning: false,
-              input: ["text"],
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-              contextWindow: 4096,
-              maxTokens: 1024,
-            },
-          ],
+          models: [model],
         },
       },
     },
@@ -89,7 +87,7 @@ export function buildSubagentStopConfig(
       auth: {
         mode: "trusted-proxy",
         trustedProxy,
-        identityScopes: { [proxyUser]: ["operator.admin", "operator.read", "operator.write"] },
+        identityScopes: { [proxyUser]: [...operatorScopes] },
       },
       trustedProxies: ["127.0.0.1"],
       tls: { enabled: true, autoGenerate: false, ...tls },
@@ -100,7 +98,7 @@ export function buildSubagentStopConfig(
           administrator: {
             agents: "*",
             sessions: { others: "write" },
-            scopes: ["operator.admin", "operator.read", "operator.write"],
+            scopes: [...operatorScopes],
           },
         },
       },
@@ -154,10 +152,7 @@ export function postSubagentKill(port: number, sessionKey: string) {
         path: `/sessions/${encodeURIComponent(sessionKey)}/kill`,
         method: "POST",
         rejectUnauthorized: false,
-        headers: {
-          ...subagentStopProxyHeaders,
-          "x-openclaw-scopes": "operator.admin",
-        },
+        headers: { ...subagentStopProxyHeaders, "x-openclaw-scopes": "operator.admin" },
       },
       (response) => {
         void json(response).then(
@@ -208,7 +203,7 @@ export async function createNaturalSubagentStopHarness(params: {
         clientName: GATEWAY_CLIENT_NAMES.CONTROL_UI,
         mode: GATEWAY_CLIENT_MODES.WEBCHAT,
         origin: "https://control.example.com",
-        scopes: ["operator.admin", "operator.read", "operator.write"],
+        scopes: [...operatorScopes],
       });
       await gateway.server.startupSettled;
     },

@@ -30,7 +30,8 @@ const pem = [
   "ABCDEF1234567890",
   "-----END PRIVATE KEY-----",
 ] as const;
-const record = (message: string) => JSON.stringify({ message });
+const record = (message: string, fields: Record<string, unknown> = {}) =>
+  JSON.stringify({ message, ...fields });
 
 async function readTail(
   params: { cursor?: number; limit?: number; maxBytes?: number },
@@ -48,22 +49,17 @@ async function readTail(
 
 it("logs.tail masks complete stored batches while preserving JSON records and byte cursors", async () => {
   const cases = [
-    { lines: pem.map(record), json: [0, 1, 2] },
-    { lines: [record(pem.join("\n"))], json: [0] },
-    { lines: pem, json: [] },
-    { lines: [record(pem[0]), pem[1], record(pem[2])], json: [0, 2] },
-    { lines: [record(pem[0]), pem[1], pem[1], pem[1], record(pem[2])], json: [0, 4] },
-    {
-      lines: pem.map((message, index) =>
-        JSON.stringify({ message, ordinary: `keep-${index}`, sequence: index }),
-      ),
-      json: [0, 1, 2],
-    },
-    { lines: [record("Authorization: Basic c2VjcmV0OnBhc3M=")], json: [0] },
-    { lines: ["before", "[[],[],[]]", "Authorization: Basic c2VjcmV0OnBhc3M="], json: [1] },
-    { lines: [record("token=synthetic-credential-123456")], json: [0] },
+    pem.map((message) => record(message)),
+    [record(pem.join("\n"))],
+    pem,
+    [record(pem[0]), pem[1], record(pem[2])],
+    [record(pem[0]), pem[1], pem[1], pem[1], record(pem[2])],
+    pem.map((message, index) => record(message, { ordinary: `keep-${index}`, sequence: index })),
+    [record("Authorization: Basic c2VjcmV0OnBhc3M=")],
+    ["before", "[[],[],[]]", "Authorization: Basic c2VjcmV0OnBhc3M="],
+    [record("token=synthetic-credential-123456")],
   ];
-  for (const { lines, json } of cases) {
+  for (const lines of cases) {
     const stored = `${lines.join("\n")}\n`;
     await fs.writeFile(file, stored);
     const tail = await readTail({ limit: 100 }, stored);
@@ -72,12 +68,13 @@ it("logs.tail masks complete stored batches while preserving JSON records and by
     for (const secret of [pem[1], "c2VjcmV0OnBhc3M=", "synthetic-credential-123456"]) {
       expect(tail.lines.join("\n")).not.toContain(secret);
     }
-    for (const index of json) {
+    for (const [index, originalLine] of lines.entries()) {
+      if (!originalLine.startsWith("{") && !originalLine.startsWith("[")) {
+        continue;
+      }
       const line = tail.lines[index];
       assert(line !== undefined);
       const masked = JSON.parse(line);
-      const originalLine = lines[index];
-      assert(originalLine !== undefined);
       const original = JSON.parse(originalLine);
       if (!Array.isArray(original)) {
         expect(Object.keys(masked)).toEqual(Object.keys(original));
@@ -95,9 +92,7 @@ it("logs.tail masks complete stored batches while preserving JSON records and by
 
 it("logs.tail applies current ordered patterns and secrets registered after the file was written", async () => {
   const fresh = '{ "message": "already ***", "ordinary": 42 }';
-  const stored =
-    [JSON.stringify({ message: "MASKME PRIVATE_STORED", numeric: 73928164 }), fresh].join("\n") +
-    "\n";
+  const stored = [record("MASKME PRIVATE_STORED", { numeric: 73928164 }), fresh].join("\n") + "\n";
   await fs.writeFile(file, stored);
   applyLoggingConfig({ redactPatterns: ["MASKME", String.raw`/\*\*\* (PRIVATE_[A-Z]+)/g`] });
   registerSecretValueForRedaction("73928164");
@@ -156,7 +151,7 @@ it("logs.tail masks late secrets and confined pattern captures inside JSON prope
 it.each(["raw", "JSON"])(
   "logs.tail masks %s PEM bodies across selection windows and separate cursor polls",
   async (format) => {
-    const lines = format === "JSON" ? pem.map(record) : [...pem];
+    const lines = format === "JSON" ? pem.map((message) => record(message)) : [...pem];
     const messages = (tail: LogTailPayload) =>
       tail.lines.map((line) => (format === "JSON" ? JSON.parse(line).message : line));
     const stored = `${lines.join("\n")}\n`;

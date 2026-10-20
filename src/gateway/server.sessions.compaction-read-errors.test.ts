@@ -1,6 +1,6 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { beforeEach, expect, test, vi } from "vitest";
 import {
-  appendTranscriptEvent,
   appendTranscriptMessage,
   loadSessionEntry,
   upsertSessionEntryCore,
@@ -36,19 +36,15 @@ const transcriptReads = vi.hoisted(() => ({
 vi.mock("../config/sessions/session-transcript-hydration.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../config/sessions/session-transcript-hydration.js")>();
-  return {
-    ...actual,
-    prepareSessionTranscriptHydration: transcriptReads.hydration,
-  };
+  transcriptReads.hydration.mockImplementation(actual.prepareSessionTranscriptHydration);
+  return { ...actual, prepareSessionTranscriptHydration: transcriptReads.hydration };
 });
 
 vi.mock("../config/sessions/session-transcript-stats.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../config/sessions/session-transcript-stats.js")>();
-  return {
-    ...actual,
-    readTranscriptStatsAsync: transcriptReads.stats,
-  };
+  transcriptReads.stats.mockImplementation(actual.readTranscriptStatsAsync);
+  return { ...actual, readTranscriptStatsAsync: transcriptReads.stats };
 });
 
 const { createSessionStoreDir, openClient } = setupGatewaySessionsTestHarness();
@@ -65,24 +61,11 @@ async function compact(key = "main", maxLines?: number) {
   }
 }
 
-let realPrepareTranscriptHydration: PrepareTranscriptHydration;
-let realTranscriptStatsReader: ReadTranscriptStats;
-
-beforeEach(async () => {
-  transcriptReads.hydration.mockReset();
-  transcriptReads.stats.mockReset();
-  const [hydration, stats] = await Promise.all([
-    vi.importActual<typeof import("../config/sessions/session-transcript-hydration.js")>(
-      "../config/sessions/session-transcript-hydration.js",
-    ),
-    vi.importActual<typeof import("../config/sessions/session-transcript-stats.js")>(
-      "../config/sessions/session-transcript-stats.js",
-    ),
-  ]);
-  realPrepareTranscriptHydration = hydration.prepareSessionTranscriptHydration;
-  realTranscriptStatsReader = stats.readTranscriptStatsAsync;
-  transcriptReads.hydration.mockImplementation(realPrepareTranscriptHydration);
-  transcriptReads.stats.mockImplementation(realTranscriptStatsReader);
+const realHydration = expectDefined(transcriptReads.hydration.getMockImplementation(), "hydration");
+const realStats = expectDefined(transcriptReads.stats.getMockImplementation(), "transcript stats");
+beforeEach(() => {
+  transcriptReads.hydration.mockReset().mockImplementation(realHydration);
+  transcriptReads.stats.mockReset().mockImplementation(realStats);
 });
 
 async function seedCompactionSession(
@@ -91,12 +74,7 @@ async function seedCompactionSession(
   withTranscript = true,
 ) {
   const { storePath } = await createSessionStoreDir();
-  const scope = {
-    agentId: "main",
-    sessionId,
-    sessionKey: "agent:main:main",
-    storePath,
-  };
+  const scope = { agentId: "main", sessionId, sessionKey: "agent:main:main", storePath };
   await upsertSessionEntryCore(
     scope,
     sessionStoreEntry(
@@ -114,16 +92,8 @@ async function seedCompactionSession(
   if (!withTranscript) {
     return scope;
   }
-  await appendTranscriptEvent(scope, {
-    type: "session",
-    version: 3,
-    id: sessionId,
-    timestamp: "2026-08-18T12:00:00.000Z",
-    cwd: "/tmp",
-  });
   await appendTranscriptMessage(scope, {
     message: { role: "user", content: "compact me", timestamp: 1 },
-    now: Date.parse("2026-08-18T12:00:01.000Z"),
   });
   return scope;
 }
@@ -135,7 +105,7 @@ const transcriptReadError = () =>
 function failTranscriptReadForSession(sessionId: string, reader: "hydration" | "stats"): void {
   if (reader === "hydration") {
     transcriptReads.hydration.mockImplementation((...params) => {
-      const prepared = realPrepareTranscriptHydration(...params);
+      const prepared = realHydration(...params);
       return {
         ...prepared,
         read: async (options) => {
@@ -149,7 +119,7 @@ function failTranscriptReadForSession(sessionId: string, reader: "hydration" | "
   } else {
     transcriptReads.stats.mockImplementation(async (scope) => {
       if (scope.sessionId !== sessionId) {
-        return realTranscriptStatsReader(scope);
+        return realStats(scope);
       }
       throw transcriptReadError();
     });
@@ -180,11 +150,7 @@ test.each([false, true])(
 
     expect(await compact()).toMatchObject({
       ok: true,
-      payload: {
-        ok: true,
-        compacted: false,
-        reason: "no transcript",
-      },
+      payload: { ok: true, compacted: false, reason: "no transcript" },
     });
   },
 );

@@ -186,10 +186,8 @@ test.each(["transcript", "admission"] as const)(
       sessionId: created.payload!.sessionId,
       storePath,
     };
-    expect(await loadTranscriptEvents(scope)).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ message: expect.objectContaining({ role: "user" }) }),
-      ]),
+    expect(await loadTranscriptEvents(scope)).not.toContainEqual(
+      expect.objectContaining({ message: expect.objectContaining({ role: "user" }) }),
     );
     expect(loadSessionEntry(scope)).toMatchObject({ sessionId: scope.sessionId });
     expect(loadSessionEntry(scope)?.restartRecoveryDeliveryRunId).toBeUndefined();
