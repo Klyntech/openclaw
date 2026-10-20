@@ -1,6 +1,6 @@
 import { asNonArrayRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeUniqueTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
-import { registerListener } from "../../../../src/shared/listeners.js";
+import { createChangeListeners } from "../../../../src/shared/listeners.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { AgentIdentityResult } from "../../api/types.ts";
 import { gatewayPresentationScope } from "../../app/gateway-presentation-scope.ts";
@@ -108,13 +108,9 @@ export function createAgentIdentityCapability(gateway: AgentIdentityGateway) {
   let presentationKey = gatewayPresentationScope(gateway).key;
   let connectionGeneration = 0;
   const identities = new Map<string, AgentIdentityResult>();
-  const listeners = new Set<() => void>();
+  const listeners = createChangeListeners();
 
-  const publish = () => {
-    for (const listener of listeners) {
-      listener();
-    }
-  };
+  const publish = listeners.publish;
 
   const resetForGateway = (snapshot: AgentIdentityGatewaySnapshot) => {
     const connected = snapshot.phase === "connected";
@@ -227,7 +223,7 @@ export function createAgentIdentityCapability(gateway: AgentIdentityGateway) {
       }
     },
     invalidate,
-    subscribe: (listener: () => void) => registerListener(listeners, listener),
+    subscribe: listeners.subscribe,
   };
   return capability;
 }
