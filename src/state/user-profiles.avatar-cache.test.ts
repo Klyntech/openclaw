@@ -95,11 +95,10 @@ it.each(["database close and reopen", "avatar replacement"] as const)(
       bytes = new Uint8Array([4, 5]);
       expect(setAvatar(profile.id, bytes, "image/png", options).ok).toBe(true);
     }
-    const staleBytes = warm.loadBytes();
     if (boundary === "database close and reopen") {
-      await expect(staleBytes).rejects.toThrow();
+      expect(() => warm.loadBytes()).toThrow("OpenClaw state database read admission changed");
     } else {
-      await expect(staleBytes).resolves.toBeUndefined();
+      await expect(warm.loadBytes()).resolves.toBeUndefined();
     }
 
     const read = observeReads();

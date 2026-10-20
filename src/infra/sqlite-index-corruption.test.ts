@@ -112,7 +112,7 @@ it.each([
     vi.spyOn(db, "exec").mockImplementation((statement) => {
       exec(statement);
       if (statement.startsWith("REINDEX ")) {
-        authority.abort(new Error(String(error)));
+        authority.abort(new Error(error));
       }
     });
   }
