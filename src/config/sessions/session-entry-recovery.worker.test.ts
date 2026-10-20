@@ -26,9 +26,59 @@ import { readSessionEntrySummariesInWorker } from "./session-entry-read-runtime.
 import { readSessionSendRecoveryPage } from "./session-pending-input-history.js";
 import type { InternalSessionEntry } from "./types.js";
 
-it("selects recovery custody and startup orphans without settled or non-main sessions", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
+type InputScope = Parameters<typeof stageSessionPendingInput>[0];
+type InputOptions = Parameters<typeof stageSessionPendingInput>[1];
+function stageInput(
+  scope: InputScope,
+  runId: string,
+  message: Partial<InputOptions["message"]> = {},
+  trackCompletion = false,
+) {
+  return stageSessionPendingInput(scope, {
+    runId,
+    message: {
+      role: "user",
+      content: `Synthetic ${runId} input`,
+      timestamp: 1,
+      idempotencyKey: `${runId}:user`,
+      __openclaw: { sessionSendDelivery: { version: 1 } },
+      ...message,
+    },
+    assertCurrent() {},
+    trackCompletion,
+  }).then((receipt) => expectDefined(receipt, "Expected accepted input custody"));
+}
+
+async function finishInputs(receipts: SessionPendingInputReceipt[]) {
+  for (const receipt of receipts) {
+    receipt.finish("interrupted");
+  }
+  await Promise.all(receipts.map(async (receipt) => receipt.settled?.()));
+}
+
+async function finishInput(
+  receipt: SessionPendingInputReceipt,
+  state: "interrupted" | "cancelled" = "interrupted",
+) {
+  receipt.finish(state);
+  await receipt.settled?.();
+}
+
+function withRecoveryStore(
+  run: (
+    database: ReturnType<typeof openOpenClawAgentDatabase>,
+    store: { agentId: string; storePath: string; env: NodeJS.ProcessEnv },
+  ) => Promise<void>,
+) {
+  return withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
     const database = openOpenClawAgentDatabase({ agentId: "main", env });
+    await run(database, { agentId: "main", storePath: database.path, env });
+  });
+}
+
+it("selects recovery custody and startup orphans without settled or non-main sessions", async () => {
+  await withRecoveryStore(async (_database, store) => {
+    const { env } = store;
     const recovery = { cycleId: "interrupted-cycle", revision: 1, chargedAttempts: 0 };
     const runs = [{ runId: "interrupted-run", lifecycleGeneration: "previous-gateway" }];
     const entries: Record<string, Partial<InternalSessionEntry>> = {
@@ -73,42 +123,35 @@ it("selects recovery custody and startup orphans without settled or non-main ses
     }
 
     const selected = await readSessionEntrySummariesInWorker({
-      agentId: "main",
-      storePath: database.path,
-      env,
+      ...store,
       mainSessionRecovery: "claims",
     });
-    expect(selected.map(({ sessionKey }) => sessionKey)).toEqual([
+    const claimKeys = [
       "agent:main:pending-cycle",
       "agent:main:pending-delivery",
       "agent:main:pending-execution",
       "agent:main:pending-final",
       "agent:main:pending-residue",
-    ]);
+    ];
+    expect(selected.map(({ sessionKey }) => sessionKey)).toEqual(claimKeys);
     const orphans = await readSessionEntrySummariesInWorker({
-      agentId: "main",
-      storePath: database.path,
-      env,
+      ...store,
       mainSessionRecovery: "orphans",
     });
     expect(orphans.map(({ sessionKey }) => sessionKey)).toEqual([
       "agent:main:orphan-aborted",
       "agent:main:orphan-interrupted",
-      "agent:main:pending-cycle",
-      "agent:main:pending-delivery",
-      "agent:main:pending-execution",
-      "agent:main:pending-final",
-      "agent:main:pending-residue",
+      ...claimKeys,
     ]);
-    expect(
-      await readSessionEntrySummariesInWorker({ agentId: "main", storePath: database.path, env }),
-    ).toHaveLength(Object.keys(entries).length);
+    expect(await readSessionEntrySummariesInWorker(store)).toHaveLength(
+      Object.keys(entries).length,
+    );
   });
 });
 
 it("pages only pending exec owners without reading unrelated session entries or saved prompts", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
+  await withRecoveryStore(async (database, store) => {
+    const { env } = store;
     const expected: string[] = [];
     for (let index = 0; index < 70; index += 1) {
       const sessionKey = `agent:main:exec-${String(index).padStart(2, "0")}`;
@@ -143,11 +186,7 @@ it("pages only pending exec owners without reading unrelated session entries or 
     });
 
     const selected = [];
-    for await (const item of iteratePendingExecNotificationEntriesInWorker({
-      agentId: "main",
-      storePath: database.path,
-      env,
-    })) {
+    for await (const item of iteratePendingExecNotificationEntriesInWorker(store)) {
       selected.push(item);
     }
     expect(selected.map(({ sessionKey }) => sessionKey)).toEqual(expected);
@@ -159,12 +198,9 @@ it("pages only pending exec owners without reading unrelated session entries or 
 });
 
 it("pages saved deliveries without unrelated or cancelled inputs and preserves live custody", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
+  await withRecoveryStore(async (database, store) => {
     const scope = {
-      agentId: "main",
-      storePath: database.path,
-      env,
+      ...store,
       sessionKey: "agent:main:mixed-recovery",
       sessionId: "mixed-recovery",
     };
@@ -172,24 +208,14 @@ it("pages saved deliveries without unrelated or cancelled inputs and preserves l
     const receipts: SessionPendingInputReceipt[] = [];
     try {
       for (let index = 0; index < 24; index++) {
-        const receipt = expectDefined(
-          await stageSessionPendingInput(scope, {
-            runId: `input-${index}`,
-            message: {
-              role: "user",
-              content: `Synthetic input ${index}`,
-              timestamp: index,
-              idempotencyKey: `input-${index}:user`,
-              ...(index === 22 ? {} : { __openclaw: { sessionSendDelivery: { version: 1 } } }),
-            },
-            assertCurrent() {},
-          }),
-          "Expected pending input custody",
-        );
+        const receipt = await stageInput(scope, `input-${index}`, {
+          content: `Synthetic input ${index}`,
+          timestamp: index,
+          ...(index === 22 ? { __openclaw: undefined } : {}),
+        });
         receipts.push(receipt);
         if (index !== 21) {
-          receipt.finish(index === 23 ? "cancelled" : "interrupted");
-          await receipt.settled?.();
+          await finishInput(receipt, index === 23 ? "cancelled" : "interrupted");
         }
       }
       const newer = await readSessionSendRecoveryPage(scope);
@@ -202,40 +228,24 @@ it("pages saved deliveries without unrelated or cancelled inputs and preserves l
       expect(newer.items.at(-1)?.state).toBe("queued");
       expect(newer.items.slice(0, -1).every((item) => item.state === "interrupted")).toBe(true);
     } finally {
-      for (const receipt of receipts) {
-        receipt.finish("interrupted");
-      }
-      await Promise.all(receipts.map(async (receipt) => receipt.settled?.()));
+      await finishInputs(receipts);
     }
   });
 });
 
 it("discovers interrupted chat inputs and reconciles crash-left queued inputs at startup", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
-    const store = { agentId: "main", storePath: database.path, env };
+  await withRecoveryStore(async (database, store) => {
     const scope = { ...store, sessionKey: "agent:main:chat-recovery", sessionId: "chat-recovery" };
     writeSessionEntry(database, scope.sessionKey, { sessionId: scope.sessionId, updatedAt: 1 });
     const receipts: SessionPendingInputReceipt[] = [];
     try {
       for (const runId of ["terminated", "killed", "legacy"]) {
-        const receipt = expectDefined(
-          await stageSessionPendingInput(scope, {
-            runId,
-            message: {
-              role: "user",
-              content: `Saved ${runId} chat input`,
-              timestamp: 1,
-              idempotencyKey: `${runId}:user`,
-              ...(runId === "legacy" ? {} : { __openclaw: { chatInputRecovery: { version: 1 } } }),
-            },
-            assertCurrent() {},
-          }),
-          "Expected accepted chat input",
-        );
+        const receipt = await stageInput(scope, runId, {
+          content: `Saved ${runId} chat input`,
+          __openclaw: runId === "legacy" ? undefined : { chatInputRecovery: { version: 1 } },
+        });
         receipts.push(receipt);
-        receipt.finish("interrupted");
-        await receipt.settled?.();
+        await finishInput(receipt);
         if (runId !== "terminated") {
           // Crash-left rows have no live receipt for lifecycle rotation to finish.
           database.db
@@ -255,18 +265,14 @@ it("discovers interrupted chat inputs and reconciles crash-left queued inputs at
         { runId: "legacy", state: "interrupted" },
       ]);
     } finally {
-      for (const receipt of receipts) {
-        receipt.finish("interrupted");
-      }
-      await Promise.all(receipts.map(async (receipt) => receipt.settled?.()));
+      await finishInputs(receipts);
     }
   });
 });
 
 it("skips an admitted store without optional pending-input storage", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
-    const store = { agentId: "main", storePath: database.path, env };
+  await withRecoveryStore(async (database, store) => {
+    const { env } = store;
     writeSessionEntry(database, "agent:main:recovery-old-store", {
       sessionId: "old-store-session",
       updatedAt: 1,
@@ -288,9 +294,7 @@ it("skips an admitted store without optional pending-input storage", async () =>
 });
 
 it("discovers only current recoverable inputs and observes writes after an empty recovery read", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
-    const store = { agentId: "main", storePath: database.path, env };
+  await withRecoveryStore(async (database, store) => {
     const scope = (name: string) => ({
       ...store,
       sessionKey: `agent:main:recovery-${name}`,
@@ -311,20 +315,11 @@ it("discovers only current recoverable inputs and observes writes after an empty
     }
     const receipts: SessionPendingInputReceipt[] = [];
     const stage = async (name: string, trackCompletion = false) => {
-      const receipt = expectDefined(
-        await stageSessionPendingInput(scope(name), {
-          runId: name,
-          message: {
-            role: "user",
-            content: `Synthetic ${name} input`,
-            timestamp: 1,
-            idempotencyKey: `${name}:user`,
-            ...(name === "ordinary" ? {} : { __openclaw: { sessionSendDelivery: { version: 1 } } }),
-          },
-          trackCompletion,
-          assertCurrent() {},
-        }),
-        "Expected accepted input custody",
+      const receipt = await stageInput(
+        scope(name),
+        name,
+        name === "ordinary" ? { __openclaw: undefined } : {},
+        trackCompletion,
       );
       receipts.push(receipt);
       return receipt;
@@ -333,22 +328,15 @@ it("discovers only current recoverable inputs and observes writes after an empty
     try {
       expect(await readPendingInputRecoveryEntriesInWorker(store)).toEqual([]);
       await stage("queued");
-      const ordinary = await stage("ordinary");
-      ordinary.finish("interrupted");
-      await ordinary.settled?.();
-      const interrupted = await stage("interrupted");
-      interrupted.finish("interrupted");
-      await interrupted.settled?.();
-      const cancelled = await stage("cancelled");
-      cancelled.finish("cancelled");
-      await cancelled.settled?.();
+      await finishInput(await stage("ordinary"));
+      await finishInput(await stage("interrupted"));
+      await finishInput(await stage("cancelled"), "cancelled");
       const completed = await stage("completed", true);
       await expectDefined(
         completed.completeAsync,
         "Expected completion owner",
       )(buildAgentRunTerminalOutcome({ status: "ok" }));
-      completed.finish("interrupted");
-      await completed.settled?.();
+      await finishInput(completed);
 
       // Collected sources retain their queued row with a consumption receipt.
       const consumed = await stage("consumed");
@@ -367,9 +355,7 @@ it("discovers only current recoverable inputs and observes writes after an empty
       );
       expect(consumed.state).toBe("consumed");
 
-      const old = await stage("old");
-      old.finish("interrupted");
-      await old.settled?.();
+      await finishInput(await stage("old"));
       writeSessionEntry(database, scope("old").sessionKey, {
         sessionId: "replacement-session",
         updatedAt: 2,
@@ -385,10 +371,7 @@ it("discovers only current recoverable inputs and observes writes after an empty
         ["agent:main:recovery-queued", "recovery-queued"],
       ]);
     } finally {
-      for (const receipt of receipts) {
-        receipt.finish("interrupted");
-      }
-      await Promise.all(receipts.map(async (receipt) => receipt.settled?.()));
+      await finishInputs(receipts);
     }
   });
 });

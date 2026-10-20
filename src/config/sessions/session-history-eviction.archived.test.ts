@@ -63,36 +63,27 @@ it("preserves archive cursor ties, page limits, and protected rows across worker
   await withSessionHistoryWorkerDatabase(
     options,
     async (owner) => {
-      const first = await owner.readArchivedEvictionCandidates({
-        env: process.env,
-        archived: { limit: 1, preserveRecentMs: 60_000, liveSessionKeys: ["agent:main:live"] },
-      });
+      const read = (after?: { archivedAt: number; sessionKey: string }) =>
+        owner.readArchivedEvictionCandidates({
+          env: process.env,
+          archived: {
+            after,
+            limit: 1,
+            preserveRecentMs: 60_000,
+            liveSessionKeys: ["agent:main:live"],
+          },
+        });
+      const first = await read();
       expect(first).toMatchObject({
         candidates: [{ sessionKey: "agent:main:eligible-a", entry: victim }],
         cursor: { archivedAt: 10, sessionKey: "agent:main:eligible-a" },
         exhausted: false,
       });
-      const second = await owner.readArchivedEvictionCandidates({
-        env: process.env,
-        archived: {
-          after: first.cursor,
-          limit: 1,
-          preserveRecentMs: 60_000,
-          liveSessionKeys: ["agent:main:live"],
-        },
-      });
+      const second = await read(first.cursor);
       expect(second.candidates.map((candidate) => candidate.sessionKey)).toEqual([
         "agent:main:eligible-b",
       ]);
-      const last = await owner.readArchivedEvictionCandidates({
-        env: process.env,
-        archived: {
-          after: second.cursor,
-          limit: 1,
-          preserveRecentMs: 60_000,
-          liveSessionKeys: ["agent:main:live"],
-        },
-      });
+      const last = await read(second.cursor);
       expect(last).toMatchObject({
         candidates: [],
         exhausted: true,

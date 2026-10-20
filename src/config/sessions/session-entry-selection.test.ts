@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { inheritSessionSelection, SessionLabelOwnerIndex } from "./session-entry-selection.js";
 import type { SessionEntry } from "./types.js";
 
+const inherit = (fields: Partial<SessionEntry>) =>
+  inheritSessionSelection({ sessionId: "parent", updatedAt: 1, ...fields });
+
 describe("inheritSessionSelection", () => {
   it("inherits canonical user and automatic provenance without the old generation", () => {
     expect(
-      inheritSessionSelection({
-        sessionId: "legacy-user",
-        updatedAt: 1,
+      inherit({
         authProfileOverride: "openai:work",
         thinkingLevel: "ultra",
       }),
@@ -17,9 +18,7 @@ describe("inheritSessionSelection", () => {
       thinkingLevel: "ultra",
     });
 
-    const automatic = inheritSessionSelection({
-      sessionId: "legacy-auto",
-      updatedAt: 1,
+    const automatic = inherit({
       authProfileOverride: "openai:fallback",
       authProfileOverrideCompactionCount: 0,
     });
@@ -31,13 +30,9 @@ describe("inheritSessionSelection", () => {
   });
 
   it("inherits an explicit configured-default selection", () => {
-    expect(
-      inheritSessionSelection({
-        sessionId: "explicit-default",
-        updatedAt: 1,
-        modelOverrideSource: "default",
-      }),
-    ).toMatchObject({ modelOverrideSource: "default" });
+    expect(inherit({ modelOverrideSource: "default" })).toMatchObject({
+      modelOverrideSource: "default",
+    });
   });
   it.each([
     { source: "auto" as const, profile: "google-vertex:fallback", inheritedProfile: undefined },
@@ -45,9 +40,7 @@ describe("inheritSessionSelection", () => {
   ])(
     "drops fallback model state while preserving only $source auth intent",
     ({ source, profile, inheritedProfile }) => {
-      const inherited = inheritSessionSelection({
-        sessionId: "legacy-auto-model",
-        updatedAt: 1,
+      const inherited = inherit({
         providerOverride: "google-vertex",
         modelOverride: "gemini-fallback",
         modelOverrideSource: "auto",
@@ -61,15 +54,13 @@ describe("inheritSessionSelection", () => {
         thinkingLevel: "high",
       });
 
-      expect(inherited.providerOverride).toBeUndefined();
-      expect(inherited.modelOverride).toBeUndefined();
-      expect(inherited.modelOverrideSource).toBeUndefined();
-      expect(inherited.agentRuntimeOverride).toBeUndefined();
-      expect(inherited.nativeRuntimeConsent).toBeUndefined();
-      expect(inherited.contextWindow).toBe("1m");
-      expect(inherited.authProfileOverride).toBe(inheritedProfile);
-      expect(inherited.authProfileOverrideSource).toBe(inheritedProfile ? "user" : undefined);
-      expect(inherited.thinkingLevel).toBe("high");
+      expect(inherited).toEqual({
+        contextWindow: "1m",
+        thinkingLevel: "high",
+        ...(inheritedProfile
+          ? { authProfileOverride: inheritedProfile, authProfileOverrideSource: "user" }
+          : {}),
+      });
     },
   );
 });
@@ -77,17 +68,14 @@ describe("inheritSessionSelection", () => {
 describe("SessionLabelOwnerIndex", () => {
   it("indexes the store once and answers repeated conflicts without rescanning entries", () => {
     const labelReads = vi.fn();
-    const entry = (sessionId: string, label: string): SessionEntry => {
-      const value = { sessionId, updatedAt: 1 } as SessionEntry;
-      Object.defineProperty(value, "label", {
-        enumerable: true,
-        get: () => {
-          labelReads();
-          return label;
-        },
-      });
-      return value;
-    };
+    const entry = (sessionId: string, label: string): SessionEntry => ({
+      sessionId,
+      updatedAt: 1,
+      get label() {
+        labelReads();
+        return label;
+      },
+    });
     const store = {
       "agent:main:a": entry("a", "Alpha"),
       "agent:main:b": entry("b", "Beta"),
