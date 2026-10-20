@@ -20,69 +20,47 @@ function expectSensitive(hints: ReturnType<typeof mapSensitivePaths>, paths: str
   );
 }
 
-const { SECTION_DOCS_URLS } = testApi;
-// Root sections without beginner-worthy pages stay explicit. Adding a root config key
-// requires choosing a docsUrl or listing it here.
-const SECTIONS_WITHOUT_DOCS = ["$schema", "meta", "attachments"] as const;
-
 it("accounts for every root config section", () => {
-  const sectionsWithDocsDecisions = new Set([
-    ...Object.keys(SECTION_DOCS_URLS),
-    ...SECTIONS_WITHOUT_DOCS,
-  ]);
-  const undecidedSections = Object.keys(OpenClawSchemaShape).filter(
-    (section) => !sectionsWithDocsDecisions.has(section),
-  );
-
-  expect(undecidedSections).toEqual([]);
+  // Sections without beginner-facing docs still require an explicit decision.
+  const urls = testApi.SECTION_DOCS_URLS;
+  const known = new Set([...Object.keys(urls), "$schema", "meta", "attachments"]);
+  expect(Object.keys(OpenClawSchemaShape).filter((key) => !known.has(key))).toEqual([]);
 });
 
 it("describes omitted settings without adding them to authored config", () => {
   const { uiHints } = buildConfigSchemaCore();
-  expect(uiHints["cron.enabled"]?.placeholder).toBe("Default: On");
-  expect(uiHints["plugins.enabled"]?.placeholder).toBe("Default: On");
-
   const config = OpenClawSchema.parse({ cron: {}, plugins: {} });
-  expect(config.cron).not.toHaveProperty("enabled");
-  expect(config.plugins).not.toHaveProperty("enabled");
+  for (const section of ["cron", "plugins"] as const) {
+    expect(uiHints[`${section}.enabled`]).toMatchObject({ placeholder: "Default: On" });
+    expect(config[section]).not.toHaveProperty("enabled");
+  }
 });
 
-it("should detect sensitive fields nested inside all structural Zod types", () => {
-  const GrandSchema = z.object({
-    simple: secret().optional(),
-    simpleReversed: z.string().optional().register(sensitive),
-    nested: z.object({ nested: secret() }),
-    list: z.array(secret()),
-    listOfObjects: z.array(z.object({ nested: secret() })),
-    headers: z.record(z.string(), secret()),
-    headersNested: z.record(z.string(), z.object({ nested: secret() })),
-    auth: z.union(branches()),
-    merged: z.object({ id: z.string() }).and(z.object({ nested: secret() })),
-    deferred: z.lazy(() => z.object({ value: secret() })),
-    defaulted: secret().default("synthetic"),
-    nullable: secret().nullable().readonly(),
-    preprocessed: z.preprocess((value) => value, z.object({ value: secret() })),
-    discriminated: z.discriminatedUnion("type", branches()),
-  });
-
-  const result = mapSensitivePaths(GrandSchema, "", {});
-
-  expectSensitive(
-    result,
-    `
-    simple simpleReversed nested.nested list[] listOfObjects[].nested headers.*
-    headersNested.*.nested auth.value merged.nested deferred.value defaulted
-    nullable preprocessed.value discriminated.value
-  `,
-  );
+it("maps sensitive fields through every structural Zod type", () => {
+  for (const [kind, field, suffix] of [
+    ["optional", secret().optional(), ""],
+    ["optional then sensitive", z.string().optional().register(sensitive), ""],
+    ["object", z.object({ nested: secret() }), ".nested"],
+    ["array", z.array(secret()), "[]"],
+    ["object array", z.array(z.object({ nested: secret() })), "[].nested"],
+    ["record", z.record(z.string(), secret()), ".*"],
+    ["object record", z.record(z.string(), z.object({ nested: secret() })), ".*.nested"],
+    ["union", z.union(branches()), ".value"],
+    ["intersection", z.object({ id: z.string() }).and(z.object({ nested: secret() })), ".nested"],
+    ["lazy", z.lazy(() => z.object({ value: secret() })), ".value"],
+    ["default", secret().default("synthetic"), ""],
+    ["nullable readonly", secret().nullable().readonly(), ""],
+    ["preprocess", z.preprocess((value) => value, z.object({ value: secret() })), ".value"],
+    ["discriminated union", z.discriminatedUnion("type", branches()), ".value"],
+  ] as const) {
+    const hints = mapSensitivePaths(z.object({ field }), "", {});
+    expect(hints, kind).toMatchObject({ [`field${suffix}`]: { sensitive: true } });
+  }
 });
 
 it("maps sensitive fields nested under object catchall schemas", () => {
-  const schema = z.object({
-    custom: z.object({}).catchall(z.object({ apiKey: secret(), label: z.string() })),
-  });
-
-  const result = mapSensitivePaths(schema, "", {});
+  const custom = z.object({}).catchall(z.object({ apiKey: secret(), label: z.string() }));
+  const result = mapSensitivePaths(z.object({ custom }), "", {});
   expect(result["custom.*.apiKey"]?.sensitive).toBe(true);
   expect(result["custom.*.label"]?.sensitive).toBe(undefined);
 });
@@ -146,10 +124,7 @@ it("preserves authored metadata without deriving tags from field names or tiers"
   const plugin = (key: string) => hints[`plugins.entries.authored-metadata.config.${key}`];
   expect(plugin("maxTokens")).toMatchObject({ sensitive: false });
   expect(plugin("maxTokens")?.tags).toBeUndefined();
-  expect(plugin("storagePath")).toMatchObject({
-    tags: ["User-defined"],
-    advanced: true,
-  });
+  expect(plugin("storagePath")).toMatchObject({ tags: ["User-defined"], advanced: true });
   expect(plugin("apiKey")?.sensitive).toBe(true);
   expect(plugin("apiKey")?.tags).toBeUndefined();
   expect(hints["channels.authored-metadata-channel.retryLimit"]?.tags).toEqual(["Tuning"]);

@@ -21,11 +21,7 @@ function literalValues(schema: JsonSchema): unknown[] | undefined {
         : undefined;
 }
 
-function collectMixedUnions(
-  schema: JsonSchema,
-  path: string[] = [],
-  result: MixedUnion[] = [],
-): MixedUnion[] {
+function collectMixedUnions(schema: JsonSchema, path: string[] = [], result: MixedUnion[] = []) {
   const values = (schema.anyOf ?? schema.oneOf)?.map(literalValues) ?? [];
   const literals = values.flatMap((value) => value ?? []);
   if (literals.length > 0 && values.includes(undefined)) {
