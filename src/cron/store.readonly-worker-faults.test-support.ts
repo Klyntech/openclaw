@@ -97,38 +97,33 @@ if (isMainThread) {
   const stagingUrl = resolveRuntimeProcessEntrypointUrl("sqliteSnapshotStaging").href;
   const creation = vi
     .spyOn(source, "create")
-    .mockImplementation((filename, options, resource, taskPorts) => {
-      return create(
+    .mockImplementation((filename, options, resource, taskPorts) =>
+      create(
         filename,
         String(filename) === stagingUrl
           ? { ...options, execArgv: [...(options?.execArgv ?? []), "--import", stagingPreload] }
           : options,
         resource,
         taskPorts,
-      );
-    });
+      ),
+    );
   return {
     cronPreload,
     cronWorkerUrl: resolveRuntimeProcessEntrypointUrl("cronReadOnly").href,
     count(stage: FaultStage): number {
-      if (!fs.existsSync(receipt)) {
-        return 0;
-      }
-      return fs
-        .readFileSync(receipt, "utf8")
-        .trim()
-        .split("\n")
-        .filter((line) => {
-          const value: unknown = JSON.parse(line);
-          assert.ok(isRecord(value));
-          assert.ok(typeof value.threadId === "number");
-          if (value.stage !== stage) {
-            return false;
-          }
-          assert.equal(value.code, stage === "read-query" ? "CONTROLLED_CRON_QUERY" : "EACCES");
-          assert.ok(stage === "copy-open" ? value.threadId === 0 : value.threadId > 0);
-          return true;
-        }).length;
+      const lines = fs.existsSync(receipt)
+        ? fs.readFileSync(receipt, "utf8").trim().split("\n")
+        : [];
+      return lines.reduce((count, line) => {
+        const value: unknown = JSON.parse(line);
+        assert.ok(isRecord(value) && typeof value.threadId === "number");
+        if (value.stage !== stage) {
+          return count;
+        }
+        assert.equal(value.code, stage === "read-query" ? "CONTROLLED_CRON_QUERY" : "EACCES");
+        assert.ok(stage === "copy-open" ? value.threadId === 0 : value.threadId > 0);
+        return count + 1;
+      }, 0);
     },
     allowRemoval: () => fs.rmSync(sentinel, { force: true }),
     restore: () => creation.mockRestore(),

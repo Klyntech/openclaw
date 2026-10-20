@@ -167,33 +167,24 @@ it.each([
   },
 );
 
-it.each(["load", "save"])(
+it.each(["load", "save", "default"])(
   "invalidates when transport cannot provide a %s result",
   async (operation) => {
     const storePath = `/synthetic/cron-unavailable-${operation}/jobs.json`;
     const failure = new Error("worker result unavailable");
     vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockRejectedValue(failure);
+    if (operation === "default") {
+      noteCronJobsStoreCommit(storePath);
+    }
     const before = getCronJobsStoreRevision(storePath);
     const result =
-      operation === "load"
-        ? loadCronJobsStoreWithConfigJobs(storePath)
-        : saveCronJobsStore(storePath, { version: 1, jobs: [] });
+      operation === "save"
+        ? saveCronJobsStore(storePath, { version: 1, jobs: [] })
+        : loadCronJobsStoreWithConfigJobs(operation === "default" ? undefined : storePath);
     await expect(result).rejects.toBe(failure);
     expect(getCronJobsStoreRevision(storePath)).toBeGreaterThan(before);
   },
 );
-
-it("invalidates retained stores when a default-partition load loses its result", async () => {
-  const storePath = "/synthetic/cron-default-unavailable/jobs.json";
-  noteCronJobsStoreCommit(storePath);
-  const before = getCronJobsStoreRevision(storePath);
-  const failure = new Error("worker result unavailable");
-  vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockRejectedValue(failure);
-
-  await expect(loadCronJobsStoreWithConfigJobs()).rejects.toBe(failure);
-
-  expect(getCronJobsStoreRevision(storePath)).toBeGreaterThan(before);
-});
 
 it("loads the current default cron partition after in-process writes without host SQL", async () => {
   await withCronStore("cron-worker-default", async (state) => {
@@ -602,20 +593,43 @@ it.each([
   },
 );
 
-it.each(["rename", "disable", "remove", "add"] as const)(
-  "reloads durable %s state after reply loss without claiming completion or replay",
-  async (mutation) => {
+it.each([
+  ["rename", true, true],
+  ["disable", true, true],
+  ["remove", true, true],
+  ["add", true, true],
+  ["remove", true, false],
+  ["remove", false, false],
+] as const)(
+  "reloads durable %s after reply loss (active=%s guarded=%s)",
+  async (mutation, active, guarded) => {
     await withCronStore("cron-guarded-lost-reply", async (fixture) => {
       const { storePath } = fixture;
       const store = cronWorkerFixture();
       for (const job of store.jobs) {
         job.state.nextRunAtMs = Date.now() + 60_000;
       }
+      if (!guarded) {
+        Object.assign(store.jobs[0]!, {
+          sessionTarget: "isolated",
+          payload: { kind: "agentTurn", message: "synthetic work" },
+        });
+      }
       await saveCronJobsStore(storePath, store);
       const resolveName = await prepareCronJobNameResolver(["first", "added"], storePath);
       const onEvent = vi.fn();
-      const service = createService(storePath, { onEvent, defaultAgentId: "main" });
-      const marker = expectDefined(markCronJobActive("first"), "active run");
+      const service = createService(storePath, {
+        onEvent,
+        defaultAgentId: "main",
+        cronEnabled: guarded,
+        ...(!guarded
+          ? { sessionStorePath: fixture.statePath("agents", "main", "sessions", "sessions.json") }
+          : {}),
+      });
+      const marker = active ? expectDefined(markCronJobActive("first"), "active run") : undefined;
+      const cleanup = !guarded
+        ? vi.spyOn(sessionReaper, "removeCronJobBaseSession").mockResolvedValue(true)
+        : undefined;
       const method =
         mutation === "remove" ? "cron.remove" : mutation === "add" ? "cron.add" : "cron.update";
       const completion = expectDefined(createCronMutationCompletion(method), "mutation receipt");
@@ -624,45 +638,48 @@ it.each(["rename", "disable", "remove", "add"] as const)(
         expect(service.getJob("first")?.name).toBe("first");
       };
       try {
-        const result = await completion
-          .run(async () => {
-            if (mutation === "remove") {
-              return await service.remove("first", { commitGuard });
-            }
-            if (mutation === "add") {
-              return await service.add(
-                {
-                  id: "added",
-                  name: "accepted add",
-                  enabled: true,
-                  schedule: { kind: "every", everyMs: 60_000 },
-                  sessionTarget: "main",
-                  wakeMode: "next-heartbeat",
-                  payload: { kind: "systemEvent", text: "synthetic event" },
-                },
-                { commitGuard },
-              );
-            }
-            return await service.update(
-              "first",
+        const operation = async () => {
+          if (mutation === "remove") {
+            return await service.remove("first", guarded ? { commitGuard } : undefined);
+          }
+          if (mutation === "add") {
+            return await service.add(
               {
-                name: "accepted edit",
-                ...(mutation === "disable" ? { enabled: false } : {}),
+                id: "added",
+                name: "accepted add",
+                enabled: true,
+                schedule: { kind: "every", everyMs: 60_000 },
+                sessionTarget: "main",
+                wakeMode: "next-heartbeat",
+                payload: { kind: "systemEvent", text: "synthetic event" },
               },
               { commitGuard },
             );
-          })
-          .then(
-            () => "reported",
-            () => "reply-lost",
+          }
+          return await service.update(
+            "first",
+            {
+              name: "accepted edit",
+              ...(mutation === "disable" ? { enabled: false } : {}),
+            },
+            { commitGuard },
           );
+        };
+        const pending = guarded ? completion.run(operation) : operation();
+        if (!guarded) {
+          await expect(pending).rejects.toThrow();
+        }
+        const result = await pending.then(
+          () => "reported",
+          () => "reply-lost",
+        );
         expect(result).toBe("reply-lost");
         expect(dropped.wasDropped()).toBe(true);
         expect(dropped.attempts).toEqual(["cron.mutateJobs"]);
         expect(completion.isCommitted()).toBe(false);
         expect(() => resolveName(mutation === "add" ? "added" : "first")).toThrow("need refresh");
-        expect(marker.jobRemoved).not.toBe(true);
-        expect(marker.cancellation?.kind).not.toBe("requested");
+        expect(marker?.jobRemoved).not.toBe(true);
+        expect(marker?.cancellation?.kind).not.toBe("requested");
         expect(onEvent).not.toHaveBeenCalled();
         await dropped.waitForExit();
         const persisted = (await fixture.load()).store.jobs;
@@ -677,6 +694,15 @@ it.each(["rename", "disable", "remove", "add"] as const)(
         if (mutation === "remove") {
           expect(persisted.some((job) => job.id === "first")).toBe(false);
           expect(service.getJob("first")).toBeUndefined();
+          if (marker) {
+            expect(marker.jobRemoved).not.toBe(true);
+          }
+          if (cleanup) {
+            if (marker) {
+              clearCronJobActive("first", marker);
+            }
+            expect(cleanup).not.toHaveBeenCalled();
+          }
         } else {
           const current = persisted.find(
             (job) => job.id === (mutation === "add" ? "added" : "first"),
@@ -691,48 +717,7 @@ it.each(["rename", "disable", "remove", "add"] as const)(
         await dropped.close();
         clearCronJobActive("first", marker);
         service.stop();
-      }
-    });
-  },
-);
-
-it.each([false, true])(
-  "does not claim removal cleanup after an unknown reply (active=%s)",
-  async (active) => {
-    await withCronStore("cron-removed-reply-cleanup", async (fixture) => {
-      const { storePath } = fixture;
-      const sessionStorePath = fixture.statePath("agents", "main", "sessions", "sessions.json");
-      const store = cronWorkerFixture();
-      const job = expectDefined(store.jobs[0], "removed job");
-      job.sessionTarget = "isolated";
-      job.payload = { kind: "agentTurn", message: "synthetic work" };
-      await saveCronJobsStore(storePath, store);
-      const service = createService(storePath, {
-        cronEnabled: false,
-        sessionStorePath,
-        defaultAgentId: "main",
-      });
-      const cleanup = vi.spyOn(sessionReaper, "removeCronJobBaseSession").mockResolvedValue(true);
-      const marker = active ? markCronJobActive(job.id) : undefined;
-      const dropped = loseFirstCronMutationReply("cron.mutateJobs");
-      try {
-        await expect(service.remove(job.id)).rejects.toThrow();
-        expect(dropped.wasDropped()).toBe(true);
-        expect(dropped.attempts).toEqual(["cron.mutateJobs"]);
-        await dropped.waitForExit();
-        expect((await fixture.load()).store.jobs.some((row) => row.id === job.id)).toBe(false);
-        await service.list({ includeDisabled: true });
-        expect(service.getJob(job.id)).toBeUndefined();
-        if (marker) {
-          expect(marker.jobRemoved).not.toBe(true);
-          clearCronJobActive(job.id, marker);
-        }
-        expect(cleanup).not.toHaveBeenCalled();
-      } finally {
-        await dropped.close();
-        clearCronJobActive(job.id, marker);
-        service.stop();
-        cleanup.mockRestore();
+        cleanup?.mockRestore();
       }
     });
   },

@@ -23,28 +23,9 @@ it.each(["worker", "snapshot"] as const)(
         if (failureStage === "worker") {
           terminate.mockRejectedValueOnce(failure);
         }
-        const pools = new Set<WorkerTaskPool<unknown, unknown>>();
-        // oxlint-disable-next-line typescript/unbound-method -- call restores the intercepted pool receiver below.
-        const close = WorkerTaskPool.prototype.close;
-        const closeSpy = vi.spyOn(WorkerTaskPool.prototype, "close").mockImplementation(function (
-          this: WorkerTaskPool<unknown, unknown>,
-          error,
-        ) {
-          pools.add(this);
-          return close.call(this, error);
-        });
+        const closeSpy = vi.spyOn(WorkerTaskPool.prototype, "close");
         // Test cleanup must also reclaim the intentionally leaked pre-fix resources.
-        const readers: Array<() => void> = [];
-        const directories: string[] = [];
-        const retain = snapshots.retainSnapshotTempDirectory;
-        const retainSpy = vi
-          .spyOn(snapshots, "retainSnapshotTempDirectory")
-          .mockImplementation((directory) => {
-            const release = retain(directory);
-            readers.push(release);
-            directories.push(directory);
-            return release;
-          });
+        const retainSpy = vi.spyOn(snapshots, "retainSnapshotTempDirectory");
         try {
           const reading = state.read(true);
           if (failureStage === "worker") {
@@ -55,6 +36,7 @@ it.each(["worker", "snapshot"] as const)(
           if (fault) {
             expect(fault.count("staging-rm")).toBeGreaterThan(0);
           }
+          const directories = retainSpy.mock.calls.map(([directory]) => directory);
           expect(directories.length).toBeGreaterThan(0);
           if (failureStage === "worker") {
             await snapshots.cleanupSnapshotOperations();
@@ -76,12 +58,18 @@ it.each(["worker", "snapshot"] as const)(
         } finally {
           terminate.mockRestore();
           fault?.allowRemoval();
+          const pools = new Set(closeSpy.mock.contexts);
           closeSpy.mockRestore();
           try {
-            await Promise.all([...pools].map((pool) => pool.close()));
+            for (const pool of pools) {
+              assert(pool instanceof WorkerTaskPool);
+              await pool.close();
+            }
           } finally {
-            for (const release of readers) {
-              release();
+            for (const result of retainSpy.mock.results) {
+              if (result.type === "return") {
+                result.value();
+              }
             }
             try {
               await snapshots.cleanupSnapshotOperations();
@@ -139,3 +127,4 @@ it("refuses new reader admission while canonical close is draining an earlier re
     expect((await state.read()).store.jobs).toEqual([]);
   });
 });
+import assert from "node:assert/strict";
