@@ -43,34 +43,28 @@ it("resolves current and ambiguous memory identities without creating missing ow
   );
   try {
     for (const actor of actors) {
-      expect(
-        (
-          await actor.storage!.mutate(
-            {
-              type: "session.entry.create",
-              input: {
-                entry: {
-                  sessionId: actor.target.sessionKey === unique ? "unique-id" : "shared-id",
-                  updatedAt: 1,
-                  incognito: true,
-                },
-              },
-            },
-            authority,
-          )
-        ).kind,
-      ).toBe("committed");
+      const entry = {
+        sessionId: actor.target.sessionKey === unique ? "unique-id" : "shared-id",
+        updatedAt: 1,
+        incognito: true,
+      };
+      const result = await actor.storage!.mutate(
+        { type: "session.entry.create", input: { entry } },
+        authority,
+      );
+      expect(result.kind).toBe("committed");
     }
+    const probe = (sessionId: string, sessionKey = unknown, agentId = "main") => ({
+      agentId,
+      sessionKey,
+      sessionId,
+    });
     const probes = [
-      { agentId: "main", sessionKey: key, sessionId: "shared-id" },
-      { agentId: "main", sessionKey: unknown, sessionId: "shared-id" },
-      { agentId: "main", sessionKey: unknown, sessionId: "unique-id" },
-      { agentId: "main", sessionKey: unknown, sessionId: "missing-id" },
-      {
-        agentId: "missing",
-        sessionKey: "agent:missing:dashboard:incognito-unknown",
-        sessionId: "shared-id",
-      },
+      probe("shared-id", key),
+      probe("shared-id"),
+      probe("unique-id"),
+      probe("missing-id"),
+      probe("shared-id", "agent:missing:dashboard:incognito-unknown", "missing"),
     ];
     const expected = [
       { status: "current", sessionKey: key },
