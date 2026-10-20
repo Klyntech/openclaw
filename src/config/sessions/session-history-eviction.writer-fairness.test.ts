@@ -45,6 +45,7 @@ it("admits a session patch and cross-store cold history between page-reclamation
       const sessionKey = "agent:main:writer-fairness";
       const historical = { sessionKey, sessionId: "fairness-history", storePath };
       const target = { agentId: "main", sessionKey, storePath };
+      const patchedEntry = { sessionId: "fairness-live", label: "foreground writer progressed" };
       const cold = await createSessionColdStorageFixture(
         state.statePath("cross-store-cold.sqlite"),
       );
@@ -57,7 +58,6 @@ it("admits a session patch and cross-store cold history between page-reclamation
       let maintenance: ReturnType<typeof enforceSqliteSessionHistoryDiskBudget> | undefined;
       let patch: ReturnType<typeof patchSessionEntryCore> | undefined;
       let history: ReturnType<typeof readChatHistoryPage> | undefined;
-      let pausedHistoryFailure: unknown;
       const withPages = pageReclamation.withSqliteSessionPageReclamation;
       const pages = vi
         .spyOn(pageReclamation, "withSqliteSessionPageReclamation")
@@ -69,11 +69,10 @@ it("admits a session patch and cross-store cold history between page-reclamation
                 const result = await reclaim(maxPages);
                 pageResults.push(result);
                 if (!patch) {
-                  patch = patchSessionEntryCore(
-                    target,
-                    () => ({ label: "foreground writer progressed" }),
-                    { skipMaintenance: true, preserveActivity: true },
-                  ).then((entry) => {
+                  patch = patchSessionEntryCore(target, () => ({ label: patchedEntry.label }), {
+                    skipMaintenance: true,
+                    preserveActivity: true,
+                  }).then((entry) => {
                     pagesAtPatchCompletion = pageResults.length;
                     return entry;
                   });
@@ -136,18 +135,16 @@ it("admits a session patch and cross-store cold history between page-reclamation
           offset: undefined,
           messageId: undefined,
         });
-        try {
-          await withTestTimeout(
-            history,
-            10_000,
-            "Cold history waited for the paused archive sweep",
-          );
-        } catch (error) {
-          pausedHistoryFailure = error;
-        } finally {
-          expect(pageResults).toHaveLength(1);
-          resumePrune.resolve();
-        }
+        const pausedHistoryFailure = await withTestTimeout(
+          history,
+          10_000,
+          "Cold history waited for the paused archive sweep",
+        ).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(pageResults).toHaveLength(1);
+        resumePrune.resolve();
         const page = await history;
         const result = await maintenance;
         expect(page.messages.map(readChatHistoryMessageId)).toEqual([
@@ -157,16 +154,10 @@ it("admits a session patch and cross-store cold history between page-reclamation
         expect(readSessionColdTranscript(cold.database(), historicalId)).toBeUndefined();
         expect(cold.snapshot()).toEqual(cold.original);
         expect(patch).toBeDefined();
-        await expect(patch).resolves.toMatchObject({
-          sessionId: "fairness-live",
-          label: "foreground writer progressed",
-        });
+        await expect(patch).resolves.toMatchObject(patchedEntry);
         expect(result).toMatchObject({ removedEntries: 0, removedFiles: 0 });
         expect(result?.totalBytesAfter).toBeLessThanOrEqual(highWaterBytes);
-        expect(loadSessionEntryReadOnly(target)).toMatchObject({
-          sessionId: "fairness-live",
-          label: "foreground writer progressed",
-        });
+        expect(loadSessionEntryReadOnly(target)).toMatchObject(patchedEntry);
         expect(loadTranscriptEventsSync(historical)).toEqual(transcript);
         expect(sessionExists("fairness-history")).toBe(true);
         expect(sessionExists("fairness-live")).toBe(true);

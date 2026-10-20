@@ -31,6 +31,8 @@ const victim: SessionEntry = {
   archivedAt: 10,
   archiveReason: "active-session-cap",
 };
+const writeVictim = (entry = victim) =>
+  runOpenClawAgentWriteTransaction((database) => writeSessionEntry(database, key, entry), options);
 
 beforeEach(async () => {
   state = await createOpenClawTestState({ prefix: "archived-eviction-", layout: "state-only" });
@@ -97,10 +99,7 @@ it("preserves archive cursor ties, page limits, and protected rows across worker
 it.each(["rebound", "admitted", "registered", "rejected", "revoked"] as const)(
   "refuses stale archived eviction after a delayed batch is %s",
   async (outcome) => {
-    runOpenClawAgentWriteTransaction(
-      (database) => writeSessionEntry(database, key, victim),
-      options,
-    );
+    writeVictim();
     const reached = createDeferred();
     const release = createDeferred();
     const createReaders = workerReaders.createSessionHistoryWorkerReaders;
@@ -132,11 +131,7 @@ it.each(["rebound", "admitted", "registered", "rejected", "revoked"] as const)(
     try {
       await awaitGateBeforeSettlement(reached.promise, sweep, "Archived worker read was bypassed");
       if (outcome === "rebound") {
-        runOpenClawAgentWriteTransaction(
-          (database) =>
-            writeSessionEntry(database, key, { sessionId: "replacement", updatedAt: 20 }),
-          options,
-        );
+        writeVictim({ sessionId: "replacement", updatedAt: 20 });
       } else if (outcome === "admitted") {
         admission = await beginSessionEffect({
           scope: storePath,

@@ -12,12 +12,14 @@ type Source = Parameters<typeof sessionPersonalProfileId>[0];
 const creator: SessionCreatedActor = { type: "human", source: "profile", id: "profile-creator" };
 const human = (id?: string, label?: string): SessionActor => ({ type: "human", id, label });
 const spawningAgent: SessionActor = { type: "agent", id: "roboclaw" };
-const owned = (actor: SessionActor): Source => ({ owner: { actor }, createdActor: creator });
+const owned = (actor: SessionActor, createdActor: SessionCreatedActor = creator): Source => ({
+  owner: { actor },
+  createdActor,
+});
 const created = (actor: SessionCreatedActor): Source => ({ createdActor: actor });
 const channelCreator: SessionCreatedActor = {
-  type: "human",
+  ...creator,
   source: "channel",
-  id: "profile-creator",
   label: "profile-owner",
 };
 
@@ -32,10 +34,7 @@ it("resolves personal profiles from assigned humans or authenticated creators on
     [undefined, undefined],
     [{}, undefined],
     [
-      {
-        owner: { actor: { type: "agent", id: "profile-owner" } },
-        createdActor: { type: "system", id: "profile-creator" },
-      },
+      owned({ type: "agent", id: "profile-owner" }, { type: "system", id: "profile-creator" }),
       undefined,
     ],
   ];
