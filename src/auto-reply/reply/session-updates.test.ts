@@ -4,7 +4,29 @@ import { createReplySessionEntryHandle } from "./session-entry-handle.js";
 
 const TEST_WORKSPACE_DIR = path.resolve("/tmp/workspace");
 
-const updateSessionEntryMock = vi.hoisted(() => vi.fn());
+const {
+  buildWorkspaceSkillSnapshotMock,
+  ensureSkillsWatcherMock,
+  getSkillsSnapshotVersionMock,
+  shouldRefreshSnapshotForVersionMock,
+  getRemoteSkillEligibilityMock,
+  updateSessionEntryMock,
+} = vi.hoisted(() => ({
+  buildWorkspaceSkillSnapshotMock: vi.fn((..._args: unknown[]) => ({
+    prompt: "",
+    skills: [] as unknown[],
+    resolvedSkills: [] as unknown[],
+  })),
+  ensureSkillsWatcherMock: vi.fn(),
+  getSkillsSnapshotVersionMock: vi.fn(() => 0),
+  shouldRefreshSnapshotForVersionMock: vi.fn((_cached?: number, _next?: number) => false),
+  getRemoteSkillEligibilityMock: vi.fn(() => ({
+    platforms: [],
+    hasBin: () => false,
+    hasAnyBin: () => false,
+  })),
+  updateSessionEntryMock: vi.fn(),
+}));
 
 // mock-isolation: Session classification is outside skill snapshot publication.
 vi.mock("../../agents/sandbox/runtime-status.js", () => ({
@@ -27,21 +49,21 @@ vi.mock("../../infra/exec-approvals-store.js", () => ({
 }));
 
 vi.mock("../../skills/runtime/remote.js", () => ({
-  getRemoteSkillEligibility: () => ({ platforms: [], hasBin: () => false, hasAnyBin: () => false }),
+  getRemoteSkillEligibility: getRemoteSkillEligibilityMock,
 }));
 
 vi.mock("../../skills/loading/workspace-skill-prompt.js", () => ({
-  buildSkillSnapshot: () => ({ prompt: "", skills: [], resolvedSkills: [] }),
+  buildSkillSnapshot: buildWorkspaceSkillSnapshotMock,
 }));
 
 vi.mock("../../skills/runtime/refresh.js", () => ({
-  ensureSkillsWatcher: () => {},
+  ensureSkillsWatcher: ensureSkillsWatcherMock,
 }));
 
 vi.mock("../../skills/runtime/refresh-state.js", () => ({
-  getSkillsSnapshotVersion: () => 0,
-  getSkillsSourceVersion: () => 0,
-  shouldRefreshSnapshotForVersion: () => false,
+  getSkillsSnapshotVersion: getSkillsSnapshotVersionMock,
+  getSkillsSourceVersion: getSkillsSnapshotVersionMock,
+  shouldRefreshSnapshotForVersion: shouldRefreshSnapshotForVersionMock,
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -57,28 +79,20 @@ vi.mock("../../config/sessions/session-accessor.sqlite-entry.js", () => ({
 
 const { ensureSkillSnapshot } = await import("./session-updates.js");
 
-const sessionKey = "agent:main:main";
-const storeScope = { sessionKey, storePath: "/tmp/sessions.json" };
-function skillFixture(
-  sessionEntry: NonNullable<Parameters<typeof ensureSkillSnapshot>[0]["sessionEntry"]>,
-) {
-  const sessionStore = { [sessionKey]: sessionEntry };
-  return {
-    agentId: "main",
-    sessionEntry,
-    sessionStore,
-    ...storeScope,
-    sessionId: sessionEntry.sessionId,
-    isFirstTurnInSession: true,
-    workspaceDir: TEST_WORKSPACE_DIR,
-    cfg: {},
-  };
-}
-
 describe("ensureSkillSnapshot", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.stubEnv("OPENCLAW_TEST_FAST", "0");
-    updateSessionEntryMock.mockReset().mockResolvedValue(null);
+    buildWorkspaceSkillSnapshotMock.mockReturnValue({ prompt: "", skills: [], resolvedSkills: [] });
+    getSkillsSnapshotVersionMock.mockReturnValue(0);
+    shouldRefreshSnapshotForVersionMock.mockReturnValue(false);
+    getRemoteSkillEligibilityMock.mockReturnValue({
+      platforms: [],
+      hasBin: () => false,
+      hasAnyBin: () => false,
+    });
+    updateSessionEntryMock.mockReset();
+    updateSessionEntryMock.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -86,23 +100,49 @@ describe("ensureSkillSnapshot", () => {
   });
 
   it("does not keep a deleted first-turn session entry when persisting skills", async () => {
-    const fixture = skillFixture({ sessionId: "deleted-session", updatedAt: 10 });
-    const sessionEntryHandle = createReplySessionEntryHandle(fixture);
-    const result = await ensureSkillSnapshot({ ...fixture, sessionEntryHandle });
+    const sessionKey = "agent:main:main";
+    const sessionEntry = {
+      sessionId: "deleted-session",
+      updatedAt: 10,
+    };
+    const sessionStore = { [sessionKey]: sessionEntry };
+    const sessionEntryHandle = createReplySessionEntryHandle({
+      sessionEntry,
+      sessionKey,
+      sessionStore,
+    });
+
+    const result = await ensureSkillSnapshot({
+      agentId: "main",
+      sessionEntry,
+      sessionEntryHandle,
+      sessionStore,
+      sessionKey,
+      sessionId: "deleted-session",
+      storePath: "/tmp/sessions.json",
+      isFirstTurnInSession: true,
+      workspaceDir: TEST_WORKSPACE_DIR,
+      cfg: {},
+    });
 
     expect(updateSessionEntryMock).toHaveBeenCalledWith(
-      storeScope,
+      {
+        storePath: "/tmp/sessions.json",
+        sessionKey,
+      },
       expect.objectContaining({ kind: "fields" }),
       expect.any(Object),
     );
-    expect(result).toMatchObject({ sessionEntry: undefined, systemSent: false });
+    expect(result.sessionEntry).toBeUndefined();
+    expect(result.systemSent).toBe(false);
     expect(sessionEntryHandle.getCurrent()).toBeUndefined();
-    expect(fixture.sessionStore[sessionKey]).toBeUndefined();
+    expect(sessionStore[sessionKey]).toBeUndefined();
   });
 
   it.each([true, false])(
     "persists only owned skill fields as a partial update (first turn: %s)",
     async (isFirstTurnInSession) => {
+      const sessionKey = "agent:main:main";
       const sessionEntry = {
         sessionId: "session-1",
         updatedAt: 10,
@@ -110,8 +150,7 @@ describe("ensureSkillSnapshot", () => {
         label: "Before rename",
         pinnedAt: 100,
       };
-      const fixture = skillFixture(sessionEntry);
-      const { sessionStore } = fixture;
+      const sessionStore = { [sessionKey]: sessionEntry };
       updateSessionEntryMock.mockImplementationOnce(async (_scope, operation) => {
         const concurrentEntry = {
           sessionId: sessionEntry.sessionId,
@@ -121,25 +160,35 @@ describe("ensureSkillSnapshot", () => {
           sendPolicy: "deny",
         };
         const patch = operation.patch;
+        expect(patch).not.toHaveProperty("sessionId");
         if (isFirstTurnInSession) {
           expect(patch).toHaveProperty("systemSent", true);
         } else {
           expect(patch).not.toHaveProperty("systemSent");
         }
-        for (const field of ["sessionId", "modelOverride", "label", "pinnedAt", "sendPolicy"]) {
-          expect(patch).not.toHaveProperty(field);
-        }
+        expect(patch).not.toHaveProperty("modelOverride");
+        expect(patch).not.toHaveProperty("label");
+        expect(patch).not.toHaveProperty("pinnedAt");
+        expect(patch).not.toHaveProperty("sendPolicy");
         return { ...concurrentEntry, ...patch };
       });
 
-      const result = await ensureSkillSnapshot({ ...fixture, isFirstTurnInSession });
-
-      expect(result.sessionEntry).toMatchObject({
-        modelOverride: "sonnet-4.6",
-        label: "After rename",
-        sendPolicy: "deny",
+      const result = await ensureSkillSnapshot({
+        agentId: "main",
+        sessionEntry,
+        sessionStore,
+        sessionKey,
+        sessionId: "session-1",
+        storePath: "/tmp/sessions.json",
+        isFirstTurnInSession,
+        workspaceDir: TEST_WORKSPACE_DIR,
+        cfg: {},
       });
-      expect(result.sessionEntry).not.toHaveProperty("pinnedAt");
+
+      expect(result.sessionEntry?.modelOverride).toBe("sonnet-4.6");
+      expect(sessionStore[sessionKey]?.modelOverride).toBe("sonnet-4.6");
+      expect(result.sessionEntry).toMatchObject({ label: "After rename", sendPolicy: "deny" });
+      expect(result.sessionEntry?.pinnedAt).toBeUndefined();
       expect(sessionStore[sessionKey]).toEqual(result.sessionEntry);
     },
   );
