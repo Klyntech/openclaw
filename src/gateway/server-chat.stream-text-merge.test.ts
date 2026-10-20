@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { createAssistantTextStream, mergeAssistantText } from "./agent-event-assistant-text.js";
+import {
+  createAssistantTextStream,
+  mergeAssistantText,
+  type AssistantTextSnapshot,
+} from "./agent-event-assistant-text.js";
 import { capLiveAssistantText } from "./live-chat-projector.js";
 
 const LIVE_CHAT_BUFFER_CHARS = 500_000;
+
+function merge(
+  previous: string | AssistantTextSnapshot,
+  input: Parameters<typeof mergeAssistantText>[1],
+) {
+  return mergeAssistantText(
+    typeof previous === "string" ? { text: previous } : previous,
+    input,
+    "live",
+  );
+}
 
 describe("server chat stream text merge", () => {
   it("keeps certified raw appends independent of display text and reconciles final corrections", () => {
@@ -37,43 +52,29 @@ describe("server chat stream text merge", () => {
 
   it("does not resurrect a discarded scoped prefix after a shorter correction", () => {
     const snapshot = "y".repeat(LIVE_CHAT_BUFFER_CHARS - 6);
-    const merged = mergeAssistantText(
-      { text: "x🚀keep" },
-      { itemId: "answer", text: snapshot, delta: snapshot },
-      "live",
-    );
+    const merged = merge("x🚀keep", { itemId: "answer", text: snapshot, delta: snapshot });
     const capped = capLiveAssistantText(merged);
     expect(capped).toBe(`keep\n\n${snapshot}`);
     expect(
       capLiveAssistantText(
-        mergeAssistantText(
-          { text: capped, scope: merged.scope },
-          { itemId: "answer", text: "!", delta: "" },
-          "live",
-        ),
+        merge({ text: capped, scope: merged.scope }, { itemId: "answer", text: "!", delta: "" }),
       ),
     ).toBe("keep\n\n!");
   });
 
   it("owes the paragraph boundary to a new item that starts with a delta, not to its later deltas", () => {
-    const first = mergeAssistantText(
-      { text: "First." },
-      { itemId: "next-item", delta: "Sec" },
-      "live",
-    );
+    const first = merge("First.", { itemId: "next-item", delta: "Sec" });
     expect(first.text).toBe("First.\n\nSec");
-    const grown = mergeAssistantText(first, { itemId: "next-item", delta: "ond." }, "live");
+    const grown = merge(first, { itemId: "next-item", delta: "ond." });
     expect(grown.text).toBe("First.\n\nSecond.");
-    expect(
-      mergeAssistantText(grown, { itemId: "next-item", text: "Second!", delta: "!" }, "live").text,
-    ).toBe("First.\n\nSecond!");
+    expect(merge(grown, { itemId: "next-item", text: "Second!", delta: "!" }).text).toBe(
+      "First.\n\nSecond!",
+    );
   });
 
   it("does not start the capped tail with the low half of a surrogate pair", () => {
     const safeTail = "y".repeat(LIVE_CHAT_BUFFER_CHARS - 1);
-    const result = capLiveAssistantText(
-      mergeAssistantText({ text: "" }, { text: `x🚀${safeTail}`, delta: "" }, "live"),
-    );
+    const result = capLiveAssistantText(merge("", { text: `x🚀${safeTail}`, delta: "" }));
 
     expect(result).toBe(safeTail);
   });
@@ -82,41 +83,21 @@ describe("server chat stream text merge", () => {
     { itemLength: LIVE_CHAT_BUFFER_CHARS - 1, corrected: "\n!" },
     { itemLength: LIVE_CHAT_BUFFER_CHARS + 1, corrected: "!" },
   ])("retains only the uncapped boundary for length $itemLength", ({ itemLength, corrected }) => {
-    const merged = mergeAssistantText(
-      { text: "First." },
-      { itemId: "answer", text: "y".repeat(itemLength) },
-      "live",
-    );
+    const merged = merge("First.", { itemId: "answer", text: "y".repeat(itemLength) });
     const capped = capLiveAssistantText(merged);
     expect(capped).toHaveLength(LIVE_CHAT_BUFFER_CHARS);
-    const grown = mergeAssistantText(
-      { text: capped, scope: merged.scope },
-      { itemId: "answer", delta: "?" },
-      "live",
-    );
+    const grown = merge({ text: capped, scope: merged.scope }, { itemId: "answer", delta: "?" });
     expect(grown.text).toBe(`${capped}?`);
-    const replacement = mergeAssistantText(grown, { itemId: "answer", text: "!" }, "live");
+    const replacement = merge(grown, { itemId: "answer", text: "!" });
     expect(replacement.text).toBe(corrected);
-    expect(mergeAssistantText(replacement, { itemId: "answer", delta: "?" }, "live").text).toBe(
-      `${corrected}?`,
-    );
+    expect(merge(replacement, { itemId: "answer", delta: "?" }).text).toBe(`${corrected}?`);
   });
 
   it("recalculates padding when a current-item snapshot gains a leading newline", () => {
-    const previous = mergeAssistantText(
-      { text: "First." },
-      { itemId: "answer", text: "\nSecond." },
-      "live",
-    );
+    const previous = merge("First.", { itemId: "answer", text: "\nSecond." });
     expect(previous.text).toBe("First.\n\nSecond.");
-    const corrected = mergeAssistantText(
-      previous,
-      { itemId: "answer", text: "\n\nSecond." },
-      "live",
-    );
+    const corrected = merge(previous, { itemId: "answer", text: "\n\nSecond." });
     expect(corrected.text).toBe("First.\n\nSecond.");
-    expect(mergeAssistantText(corrected, { itemId: "answer", delta: "!" }, "live").text).toBe(
-      "First.\n\nSecond.!",
-    );
+    expect(merge(corrected, { itemId: "answer", delta: "!" }).text).toBe("First.\n\nSecond.!");
   });
 });

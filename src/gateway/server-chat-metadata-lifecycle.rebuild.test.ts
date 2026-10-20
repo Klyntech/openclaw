@@ -6,6 +6,7 @@ import {
   resetPreparedModelRuntimeHarness,
 } from "../agents/prepared-model-runtime.test-harness.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { withTestTimeout } from "../../test/helpers/promise.js";
 import { refreshPreparedModelRuntimeSnapshots } from "../agents/prepared-model-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -79,23 +80,16 @@ it("serves the published list while a provider never answers", async () => {
   );
   const read = async () => {
     // The replacement below never settles; a read that waits on it fails this budget.
-    let timer: NodeJS.Timeout | undefined;
-    const budget = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("models.list waited for the rebuild")), 1_000);
-    });
-    try {
-      const result = await Promise.race([
-        lifecycle.readModelsList({
-          agentId: "main",
-          params: { view: "configured" },
-          includeManualSelection: false,
-        }),
-        budget,
-      ]);
-      return result?.models.map(({ provider, id }) => `${provider}/${id}`);
-    } finally {
-      clearTimeout(timer);
-    }
+    const result = await withTestTimeout(
+      lifecycle.readModelsList({
+        agentId: "main",
+        params: { view: "configured" },
+        includeManualSelection: false,
+      }),
+      1_000,
+      "models.list waited for the rebuild",
+    );
+    return result?.models.map(({ provider, id }) => `${provider}/${id}`);
   };
   expect(await read()).toContain("openai/gpt-5.4");
   const discovery = createDeferredCore<{ entries: (typeof model)[]; routeVariants: [] }>();

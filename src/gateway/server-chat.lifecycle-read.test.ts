@@ -22,6 +22,28 @@ let config: OpenClawConfig = { agents: { ownership: "explicit", entries: { main:
 // mock-isolation: The isolated fixture owns routing; no operator configuration is read.
 vi.mock("../config/io.js", () => ({ getRuntimeConfig: () => config }));
 
+function holdRecoveryRead(once = false) {
+  const release = createDeferred();
+  const entered = createDeferred();
+  const read = sessionReader.loadGatewaySessionEntryReadOnlyInWorker;
+  const held = vi.spyOn(sessionReader, "loadGatewaySessionEntryReadOnlyInWorker");
+  const method = once ? "mockImplementationOnce" : "mockImplementation";
+  held[method](async (params) => {
+    const result = await read(params);
+    entered.resolve();
+    await release.promise;
+    return result;
+  });
+  return { release, entered, held };
+}
+
+function registeredHarness(key = sessionKey) {
+  const h = createAgentEventTestHarness();
+  h.nodeHasSessionSubscribers.mockReturnValue(false);
+  h.register("worker-lifecycle", key, "worker-lifecycle");
+  return h;
+}
+
 function event(phase: "start" | "end", seq = 1): AgentEventRuntimePayload {
   return {
     runId: "worker-lifecycle",
@@ -43,20 +65,8 @@ it("reads lifecycle recovery in workers and retains tool/text order through clos
       { sessionId: "worker-lifecycle-session", updatedAt: 1 },
     );
     await sessionReader.loadGatewaySessionEntryReadOnlyInWorker({ cfg: config, key: sessionKey });
-    const release = createDeferred();
-    const entered = createDeferred();
-    const read = sessionReader.loadGatewaySessionEntryReadOnlyInWorker;
-    const held = vi
-      .spyOn(sessionReader, "loadGatewaySessionEntryReadOnlyInWorker")
-      .mockImplementation(async (params) => {
-        const result = await read(params);
-        entered.resolve();
-        await release.promise;
-        return result;
-      });
-    const h = createAgentEventTestHarness();
-    h.nodeHasSessionSubscribers.mockReturnValue(false);
-    h.register("worker-lifecycle", sessionKey, "worker-lifecycle");
+    const { release, entered, held } = holdRecoveryRead();
+    const h = registeredHarness();
     h.toolEventRecipients.add("worker-lifecycle", "tool-client");
     const sql = observeHostDataSql();
     let closing: Promise<void> | undefined;
@@ -113,20 +123,8 @@ it("reads queued recovery state once after the preceding event settles", async (
     setRuntimeConfigSnapshot(config);
     const target = { agentId: "main", sessionKey, env };
     replaceSessionEntrySync(target, { sessionId: "worker-lifecycle-session", updatedAt: 1 });
-    const entered = createDeferred();
-    const release = createDeferred();
-    const read = sessionReader.loadGatewaySessionEntryReadOnlyInWorker;
-    const held = vi
-      .spyOn(sessionReader, "loadGatewaySessionEntryReadOnlyInWorker")
-      .mockImplementationOnce(async (params) => {
-        const result = await read(params);
-        entered.resolve();
-        await release.promise;
-        return result;
-      });
-    const h = createAgentEventTestHarness();
-    h.nodeHasSessionSubscribers.mockReturnValue(false);
-    h.register("worker-lifecycle", sessionKey, "worker-lifecycle");
+    const { release, entered, held } = holdRecoveryRead(true);
+    const h = registeredHarness();
     try {
       const first = h.handler(event("start"));
       await awaitGateBeforeSettlement(
@@ -191,9 +189,7 @@ it("delivers an incognito turn's lifecycle and reply with contiguous sequences",
       { agentId: "main", sessionKey: key, env },
       { sessionId: "worker-lifecycle-session", updatedAt: 1, incognito: true },
     );
-    const h = createAgentEventTestHarness();
-    h.nodeHasSessionSubscribers.mockReturnValue(false);
-    h.register("worker-lifecycle", key, "worker-lifecycle");
+    const h = registeredHarness(key);
     try {
       const outcomes = await Promise.allSettled([
         h.handler({
