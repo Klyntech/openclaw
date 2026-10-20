@@ -18,6 +18,7 @@ import { persistGatewaySessionLifecycleEvent } from "./session-lifecycle-state.j
 import * as sessionReader from "./session-utils-store-worker.js";
 
 const sessionKey = "agent:main:worker-lifecycle";
+const sessionId = "worker-lifecycle-session";
 let config: OpenClawConfig = { agents: { ownership: "explicit", entries: { main: {} } } };
 // mock-isolation: The isolated fixture owns routing; no operator configuration is read.
 vi.mock("../config/io.js", () => ({ getRuntimeConfig: () => config }));
@@ -41,7 +42,20 @@ function registeredHarness(key = sessionKey) {
   const h = createAgentEventTestHarness();
   h.nodeHasSessionSubscribers.mockReturnValue(false);
   h.register("worker-lifecycle", key, "worker-lifecycle");
-  return h;
+  return Object.assign(h, {
+    send: (
+      stream: AgentEventRuntimePayload["stream"],
+      data: AgentEventRuntimePayload["data"],
+      seq = 1,
+      overrides: Partial<AgentEventRuntimePayload> = {},
+    ) => h.handler({ ...event("start", seq), sessionKey: key, stream, data, ...overrides }),
+  });
+}
+
+function seedSession(env: NodeJS.ProcessEnv) {
+  const target = { agentId: "main", sessionKey, env };
+  replaceSessionEntrySync(target, { sessionId, updatedAt: 1 });
+  return target;
 }
 
 function event(phase: "start" | "end", seq = 1): AgentEventRuntimePayload {
@@ -49,7 +63,7 @@ function event(phase: "start" | "end", seq = 1): AgentEventRuntimePayload {
     runId: "worker-lifecycle",
     agentId: "main",
     sessionKey,
-    sessionId: "worker-lifecycle-session",
+    sessionId,
     lifecycleGeneration: "worker-lifecycle-generation",
     stream: "lifecycle",
     seq,
@@ -60,10 +74,7 @@ function event(phase: "start" | "end", seq = 1): AgentEventRuntimePayload {
 
 it("reads lifecycle recovery in workers and retains tool/text order through close", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    replaceSessionEntrySync(
-      { agentId: "main", sessionKey, env },
-      { sessionId: "worker-lifecycle-session", updatedAt: 1 },
-    );
+    seedSession(env);
     await sessionReader.loadGatewaySessionEntryReadOnlyInWorker({ cfg: config, key: sessionKey });
     const { release, entered, held } = holdRecoveryRead();
     const h = registeredHarness();
@@ -76,27 +87,14 @@ it("reads lifecycle recovery in workers and retains tool/text order through clos
         sql.queries.filter((query) => /\bfrom\s+"?session_(?:nodes|participants)\b/i.test(query)),
       ).toEqual([]);
       await entered.promise;
-      const tool = h.handler({
-        ...event("start", 2),
-        stream: "tool",
-        data: { phase: "start", name: "read" },
-      });
-      const text = h.handler({
-        ...event("start", 3),
-        stream: "assistant",
-        data: { text: "Complete reply" },
-      });
+      const tool = h.send("tool", { phase: "start", name: "read" }, 2);
+      const text = h.send("assistant", { text: "Complete reply" }, 3);
       const terminal = h.handler(event("end", 4));
       let closed = false;
       closing = h.handler.dispose().then(() => {
         closed = true;
       });
-      const refused = h.handler({
-        ...event("start"),
-        runId: "late-new-run",
-        stream: "assistant",
-        data: { text: "Refused" },
-      });
+      const refused = h.send("assistant", { text: "Refused" }, 1, { runId: "late-new-run" });
       expect(closed).toBe(false);
       release.resolve();
       await Promise.all([starting, tool, text, terminal, closing, refused]);
@@ -121,8 +119,7 @@ it("reads lifecycle recovery in workers and retains tool/text order through clos
 it("reads queued recovery state once after the preceding event settles", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
     setRuntimeConfigSnapshot(config);
-    const target = { agentId: "main", sessionKey, env };
-    replaceSessionEntrySync(target, { sessionId: "worker-lifecycle-session", updatedAt: 1 });
+    const target = seedSession(env);
     const { release, entered, held } = holdRecoveryRead(true);
     const h = registeredHarness();
     try {
@@ -134,7 +131,7 @@ it("reads queued recovery state once after the preceding event settles", async (
       );
       const queued = h.handler({ ...event("start", 2), lifecycleGeneration: "pre-restart" });
       await replaceSessionEntry(target, {
-        sessionId: "worker-lifecycle-session",
+        sessionId,
         updatedAt: 2_000,
         abortedLastRun: true,
         restartRecoveryRuns: [{ runId: "worker-lifecycle", lifecycleGeneration: "pre-restart" }],
@@ -154,18 +151,12 @@ it("reads queued recovery state once after the preceding event settles", async (
 
 it("rejects an event whose live claim retires during recovery preparation", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-    replaceSessionEntrySync(
-      { agentId: "main", sessionKey, env },
-      { sessionId: "worker-lifecycle-session", updatedAt: 1 },
-    );
+    seedSession(env);
     const h = createAgentEventTestHarness();
     const start = event("start");
     const claimId = claimAgentRunContext(
       start.runId,
-      {
-        sessionKey,
-        lifecycleGeneration: start.lifecycleGeneration,
-      },
+      { sessionKey, lifecycleGeneration: start.lifecycleGeneration },
       { trackOwner: true },
     );
     try {
@@ -187,24 +178,14 @@ it("delivers an incognito turn's lifecycle and reply with contiguous sequences",
     const key = "agent:main:dashboard:incognito-lifecycle";
     await replaceSessionEntry(
       { agentId: "main", sessionKey: key, env },
-      { sessionId: "worker-lifecycle-session", updatedAt: 1, incognito: true },
+      { sessionId, updatedAt: 1, incognito: true },
     );
     const h = registeredHarness(key);
     try {
       const outcomes = await Promise.allSettled([
-        h.handler({
-          ...event("start"),
-          sessionKey: key,
-          stream: "run_status",
-          data: { phase: "queued" },
-        }),
+        h.send("run_status", { phase: "queued" }),
         h.handler({ ...event("start", 2), sessionKey: key }),
-        h.handler({
-          ...event("start", 3),
-          sessionKey: key,
-          stream: "assistant",
-          data: { text: "Private reply" },
-        }),
+        h.send("assistant", { text: "Private reply" }, 3),
         h.handler({ ...event("end", 4), sessionKey: key }),
       ]);
       expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
@@ -264,10 +245,8 @@ it("settles accepted direct lifecycle writes through a qualified global alias", 
       scope.beginClose();
       await persistence;
       const stored = { ...target, storePath: selected.storePath };
-      expect(loadExactSessionEntryReadOnly(stored)?.entry).toMatchObject({
-        lifecycleRunId: "selected-alias-run",
-      });
-      expect(loadExactSessionEntryReadOnly(stored)?.entry.status).toBeUndefined();
+      const saved = loadExactSessionEntryReadOnly(stored)?.entry;
+      expect([saved?.lifecycleRunId, saved?.status]).toEqual(["selected-alias-run", undefined]);
       expect(
         loadExactSessionEntryReadOnly({ ...stored, sessionKey: requestedKey }),
       ).toBeUndefined();

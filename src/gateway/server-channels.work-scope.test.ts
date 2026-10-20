@@ -1,6 +1,5 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
-import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/runtime.js";
 import { resetGatewayWorkAdmission } from "../process/gateway-work-admission.js";
@@ -12,17 +11,15 @@ import {
   createTestGatewayScheduler,
 } from "../test-utils/gateway-scheduler-clock.js";
 import { restartRunningChannelAccounts } from "./channel-thaw-restart.js";
-import { createChannelManager } from "./server-channels.js";
-import { createTestPlugin } from "./server-channels.test-support.js";
+import {
+  createTestChannelManager,
+  createTestPlugin,
+  waitForAbort,
+} from "./server-channels.test-support.js";
 
 vi.mock("../infra/approval-handler-bootstrap.js", () => ({
   startChannelApprovalHandlerBootstrap: async () => async () => {},
 }));
-
-beforeEach(() => {
-  resetGatewayWorkAdmission();
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -30,6 +27,8 @@ afterEach(() => {
 });
 
 it("keeps thaw-restarted channel work alive after the maintenance tick finishes", async () => {
+  resetGatewayWorkAdmission();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const inbound = createDeferred();
   const reply = createDeferred<string>();
   const initialStarted = createDeferred<AbortSignal>();
@@ -44,22 +43,13 @@ it("keeps thaw-restarted channel work alive after the maintenance tick finishes"
         await inbound.promise;
         reply.resolve(trackAsyncWork(async () => "reply"));
       }
-      await new Promise<void>((resolve) => {
-        abortSignal.addEventListener("abort", () => resolve(), { once: true });
-      });
+      await waitForAbort(abortSignal);
     },
   });
   const registry = createTestRegistry([{ pluginId: plugin.id, source: "test", plugin }]);
   const previousRegistry = getActivePluginRegistry();
   setActivePluginRegistry(registry);
-  const log = createSubsystemLogger("gateway/channel-work-scope-test");
-  const manager = createChannelManager({
-    scheduler: createTestGatewayScheduler(),
-    getRuntimeConfig: () => ({}),
-    getPluginRegistry: () => registry,
-    channelLogs: { discord: log },
-    channelRuntimeEnvs: { discord: runtimeForLogger(log) },
-  });
+  const manager = createTestChannelManager({ getPluginRegistry: () => registry });
   const clock = createGatewaySchedulerClock();
   const scheduler = createTestGatewayScheduler(clock.clock);
   const errors: string[] = [];

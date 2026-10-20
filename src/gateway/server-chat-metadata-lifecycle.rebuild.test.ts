@@ -5,15 +5,12 @@ import {
   getPreparedModelRuntimeMocks,
   resetPreparedModelRuntimeHarness,
 } from "../agents/prepared-model-runtime.test-harness.js";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { withTestTimeout } from "../../test/helpers/promise.js";
 import { refreshPreparedModelRuntimeSnapshots } from "../agents/prepared-model-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import {
-  createOpenClawTestState,
-  type OpenClawTestState,
-} from "../test-utils/openclaw-test-state.js";
+import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { model } from "./server-chat-metadata-lifecycle.auth.test-support.js";
 import { createGatewayChatMetadataLifecycle } from "./server-chat-metadata-lifecycle.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
@@ -30,33 +27,6 @@ const config = {
     entries: { main: {} },
   },
 } as OpenClawConfig;
-const signedIn = {
-  version: 1,
-  profiles: { "openai:default": { type: "api_key", provider: "openai", key: "sk-test" } },
-} as const;
-let state: OpenClawTestState;
-let sidecars = createGatewaySidecarStopOwner();
-
-beforeEach(async () => {
-  vi.stubEnv("OPENAI_API_KEY", "");
-  state = await createOpenClawTestState({ label: "metadata-rebuild" });
-  await resetPreparedModelRuntimeHarness(state);
-  mocks.configuredAgentIds = ["main"];
-  mocks.authStorage.getAll.mockReturnValue({ openai: { type: "api_key", key: "sk-test" } });
-  mocks.preparedAuthStore = structuredClone(signedIn);
-  mocks.buildPreparedModelCatalogSnapshot.mockResolvedValue({
-    entries: [model],
-    routeVariants: [model],
-  });
-  sidecars = createGatewaySidecarStopOwner();
-});
-
-afterEach(async ({ task }) => {
-  await sidecars.stop();
-  await cleanupPreparedModelRuntimeHarness(state, task.result?.state === "fail");
-  vi.unstubAllEnvs();
-});
-
 const publishOwner = () =>
   refreshPreparedModelRuntimeSnapshots(config, {
     gatewayLifecycle: true,
@@ -64,7 +34,26 @@ const publishOwner = () =>
     allowGatewaySubagentBinding: true,
   });
 
-it("serves the published list while a provider never answers", async () => {
+it("serves the published list while a provider never answers", async ({ task }) => {
+  vi.stubEnv("OPENAI_API_KEY", "");
+  const state = await createOpenClawTestState({ label: "metadata-rebuild" });
+  const sidecars = createGatewaySidecarStopOwner();
+  onTestFinished(async () => {
+    await sidecars.stop();
+    await cleanupPreparedModelRuntimeHarness(state, task.result?.state === "fail");
+    vi.unstubAllEnvs();
+  });
+  await resetPreparedModelRuntimeHarness(state);
+  mocks.configuredAgentIds = ["main"];
+  mocks.authStorage.getAll.mockReturnValue({ openai: { type: "api_key", key: "sk-test" } });
+  mocks.preparedAuthStore = {
+    version: 1,
+    profiles: { "openai:default": { type: "api_key", provider: "openai", key: "sk-test" } },
+  };
+  mocks.buildPreparedModelCatalogSnapshot.mockResolvedValue({
+    entries: [model],
+    routeVariants: [model],
+  });
   await publishOwner();
   const lifecycle = await createGatewayChatMetadataLifecycle({
     getConfig: () => config,
