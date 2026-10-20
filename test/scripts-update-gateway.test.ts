@@ -29,6 +29,10 @@ const git = (cwd: string, ...args: string[]) =>
 const commitFixture = (cwd: string, message: string) => git(cwd, "commit", "-qm", message);
 const writeSeed = (file: string, data: Parameters<typeof fs.writeFileSync>[1]) =>
   fs.writeFileSync(path.join(seed, file), data);
+const stageSeed = (file: string, data: Parameters<typeof fs.writeFileSync>[1], force = false) => {
+  writeSeed(file, data);
+  git(seed, "add", ...(force ? ["-f"] : []), file);
+};
 const copyDriver = () =>
   fs.copyFileSync(
     path.join(repoRoot, "scripts/update-gateway.sh"),
@@ -36,20 +40,20 @@ const copyDriver = () =>
   );
 
 const read = (file: string) => fs.readFileSync(file, "utf8");
+const live = (file: string) => path.join(workdir, file);
+const bin = (file: string) => path.join(shimDir, file);
 const prepareRuntime = (marker: string) =>
-  execFileSync(process.execPath, [path.join(shimDir, "write-runtime.cjs"), marker], {
-    cwd: workdir,
-  });
+  execFileSync(process.execPath, [bin("write-runtime.cjs"), marker], { cwd: workdir });
 const sourceState = () => ({
   head: git(workdir, "rev-parse", "HEAD"),
-  dependency: read(path.join(workdir, "node_modules/serving-marker")),
+  dependency: read(live("node_modules/serving-marker")),
   installed: calls().includes("live-install"),
   restarted: calls().includes("unexpected-restart"),
 });
 const runtimeState = () => ({
   ...sourceState(),
   branch: git(workdir, "branch", "--show-current"),
-  marker: read(path.join(workdir, "dist/marker")),
+  marker: read(live("dist/marker")),
 });
 const retainedBackups = () =>
   fs.readdirSync(workdir).filter((name) => name.includes(".openclaw-update-"));
@@ -61,11 +65,27 @@ function publishSeed(message: string, pull = true) {
   }
 }
 
-function writeShim(name: string, body: string) {
-  const file = path.join(shimDir, name);
-  fs.writeFileSync(file, `#!/bin/bash\n${body}\n`);
+function writeShim(name: string, ...lines: (string | false)[]) {
+  const file = bin(name);
+  fs.writeFileSync(file, `#!/bin/bash\n${lines.filter((line) => line !== false).join("\n")}\n`);
   fs.chmodSync(file, 0o755);
 }
+const writeGit = (...lines: (string | false)[]) =>
+  writeShim("git", ...lines, 'PATH="${PATH#*:}" exec git "$@"');
+const writePnpm = (...lines: string[]) =>
+  writeShim(
+    "pnpm",
+    'if [ "$1" = --version ]; then echo 12.4.0; exit 0; fi',
+    'echo "pnpm $*" >> "$UPDATE_TEST_LOG"',
+    ...lines,
+  );
+const expectExit = (result: ReturnType<typeof runUpdater>, code: number) =>
+  expect(result.status, result.stdout + result.stderr).toBe(code);
+const unchangedSource = (head: string) => ({
+  head,
+  dependency: "original dependency\n",
+  restarted: false,
+});
 
 function runUpdater(overrides: Record<string, string> = {}) {
   const env = { ...process.env, ...overrides };
@@ -74,7 +94,7 @@ function runUpdater(overrides: Record<string, string> = {}) {
       delete env[name];
     }
   }
-  return spawnSync("/bin/bash", [path.join(workdir, "scripts/update-gateway.sh")], {
+  return spawnSync("/bin/bash", [live("scripts/update-gateway.sh")], {
     cwd: workdir,
     encoding: "utf8",
     env: {
@@ -122,13 +142,13 @@ beforeEach(() => {
   commitFixture(seed, "fixture");
   git(scratch, "clone", "-q", "--bare", seed, origin);
   git(scratch, "clone", "-q", origin, workdir);
-  writeShim("git", 'echo "git $*" >> "$UPDATE_TEST_LOG"\nPATH="${PATH#*:}" exec git "$@"');
+  writeGit('echo "git $*" >> "$UPDATE_TEST_LOG"');
   writeShim(
     "corepack",
     'echo "corepack $*" >> "$UPDATE_TEST_LOG"\nln -s "$UPDATE_TEST_BIN/pnpm" "$3/pnpm"',
   );
   fs.writeFileSync(
-    path.join(shimDir, "write-runtime.cjs"),
+    bin("write-runtime.cjs"),
     String.raw`
 const fs = require('node:fs');
 const path = require('node:path');
@@ -142,10 +162,7 @@ for (const name of ['.buildstamp','.runtime-postbuildstamp']) fs.writeFileSync(p
 fs.writeFileSync('dist/marker', process.argv[2] || 'new');
 `,
   );
-  writeShim(
-    "pnpm",
-    'if [ "$1" = --version ]; then echo 12.4.0; exit 0; fi\necho "pnpm $*" >> "$UPDATE_TEST_LOG"',
-  );
+  writePnpm();
   writeShim("openclaw", 'echo "openclaw $*" >> "$UPDATE_TEST_LOG"');
 });
 afterEach(() => fs.rmSync(scratch, { recursive: true, force: true }));
@@ -166,24 +183,18 @@ function runRefusedSourceUpdate(
   buildSteps: readonly string[] = [],
   overrides: Record<string, string> = {},
 ) {
-  writeSeed("target.txt", "new tracked source\n");
-  git(seed, "add", "target.txt");
+  stageSeed("target.txt", "new tracked source\n");
   publishSeed("target", false);
   const original = git(workdir, "rev-parse", "HEAD");
-  fs.mkdirSync(path.join(workdir, "node_modules"));
-  const dependency = path.join(workdir, "node_modules", "serving-marker");
+  fs.mkdirSync(live("node_modules"));
+  const dependency = live("node_modules/serving-marker");
   fs.writeFileSync(dependency, "original dependency\n");
-  writeShim(
-    "pnpm",
-    [
-      'if [ "$1" = --version ]; then echo 12.4.0; exit 0; fi',
-      'echo "pnpm $*" >> "$UPDATE_TEST_LOG"',
-      'if [ "$1" = install ]; then if [ "$PWD" = "$UPDATE_TEST_LIVE_ROOT" ]; then echo live-install >> "$UPDATE_TEST_LOG"; fi; mkdir -p node_modules; echo changed > node_modules/serving-marker; fi',
-      'if [ "$1" = build ]; then',
-      'node "$UPDATE_TEST_BIN/write-runtime.cjs" new',
-      ...buildSteps,
-      "fi",
-    ].join("\n"),
+  writePnpm(
+    'if [ "$1" = install ]; then if [ "$PWD" = "$UPDATE_TEST_LIVE_ROOT" ]; then echo live-install >> "$UPDATE_TEST_LOG"; fi; mkdir -p node_modules; echo changed > node_modules/serving-marker; fi',
+    'if [ "$1" = build ]; then',
+    'node "$UPDATE_TEST_BIN/write-runtime.cjs" new',
+    ...buildSteps,
+    "fi",
   );
   writeShim("refuse-stop", 'echo stop-refused >> "$UPDATE_TEST_LOG"\nexit 23');
   writeShim("restart-proof", 'echo unexpected-restart >> "$UPDATE_TEST_LOG"');
@@ -196,22 +207,18 @@ function runRefusedSourceUpdate(
 }
 
 it("preserves changed live artifacts under inspected custody", () => {
-  writeSeed(
+  stageSeed(
     "scripts/stage-bundled-plugin-runtime.mts",
     `export { prepareBundledPluginRuntime } from ${JSON.stringify(stageRuntimeUrl.href)};\n`,
   );
-  git(seed, "add", "scripts/stage-bundled-plugin-runtime.mts");
   publishSeed("runtime inspector");
-  fs.mkdirSync(path.join(workdir, "dist/extensions/demo"), { recursive: true });
-  fs.writeFileSync(
-    path.join(workdir, "dist/extensions/demo/index.js"),
-    "export const current = true;\n",
-  );
+  fs.mkdirSync(live("dist/extensions/demo"), { recursive: true });
+  fs.writeFileSync(live("dist/extensions/demo/index.js"), "export const current = true;\n");
   stageBundledPluginRuntime({ repoRoot: workdir });
-  const serving = path.join(workdir, "dist-runtime/extensions/demo/index.js");
+  const serving = live("dist-runtime/extensions/demo/index.js");
   fs.writeFileSync(serving, "previous serving generation\n");
   const before = { bytes: fs.readFileSync(serving), ino: fs.statSync(serving).ino };
-  const probe = path.join(shimDir, "inspect-artifacts.mts");
+  const probe = bin("inspect-artifacts.mts");
   fs.writeFileSync(
     probe,
     `
@@ -231,16 +238,10 @@ await withDistArtifactOwnership(process.cwd(), async () => {
   const { result, original } = runRefusedSourceUpdate([
     `node --import ${JSON.stringify(path.join(repoRoot, "scripts/tsx.mjs"))} ${JSON.stringify(probe)}`,
   ]);
-  expect(result.status, result.stdout + result.stderr).toBe(23);
-  expect(calls()).toContain("artifact-fact:false");
-  expect(calls()).toContain("stop-refused");
+  expectExit(result, 23);
+  expect(calls()).toEqual(expect.arrayContaining(["artifact-fact:false", "stop-refused"]));
   expect({ bytes: fs.readFileSync(serving), ino: fs.statSync(serving).ino }).toEqual(before);
-  expect(sourceState()).toEqual({
-    head: original,
-    dependency: "original dependency\n",
-    installed: false,
-    restarted: false,
-  });
+  expect(sourceState()).toEqual({ ...unchangedSource(original), installed: false });
 });
 
 it("retains the published 9.6 three-argument first-hop contract", () => {
@@ -250,14 +251,13 @@ it("retains the published 9.6 three-argument first-hop contract", () => {
   expect(createHash("sha256").update(published).digest("hex")).toBe(
     "38bb92e899187cb2d86cf5ef043d2de2aa02a1b0bbcade505b104a036f3d7837",
   );
-  writeSeed("scripts/update-gateway.sh", published);
-  git(seed, "add", "scripts/update-gateway.sh");
+  stageSeed("scripts/update-gateway.sh", published);
   publishSeed("published source driver");
   // The old shell is already running when its target replaces this file.
   copyDriver();
   git(seed, "add", "scripts/update-gateway.sh");
   const { result, original, dependency } = runRefusedSourceUpdate();
-  expect(result.status, result.stdout + result.stderr).toBe(23);
+  expectExit(result, 23);
   expect(calls()).toContain("stop-refused");
   expect(git(workdir, "rev-parse", "HEAD")).not.toBe(original);
   expect(read(dependency)).toBe("changed\n");
@@ -272,16 +272,14 @@ it.each([
   "tracked-runtime-rollback",
   "tracked-runtime-partial",
   "restore-branch-drift",
-] as const)(
-  "publishes or restores complete source runtime through the reference entry (%s)",
-  (mode) => {
-    const trackedAsset = "dist/tracked-runtime.txt";
-    const trackedRuntime = mode.startsWith("tracked-runtime-");
-    const interceptRename = mode === "tracked-runtime-partial" || mode === "restore-branch-drift";
-    if (interceptRename) {
-      writeSeed(
-        "scripts/update-gateway-build.mts",
-        `
+] as const)("publishes or restores source runtime (%s)", (mode) => {
+  const trackedAsset = "dist/tracked-runtime.txt";
+  const trackedRuntime = mode.startsWith("tracked-runtime-");
+  const interceptRename = mode === "tracked-runtime-partial" || mode === "restore-branch-drift";
+  if (interceptRename) {
+    stageSeed(
+      "scripts/update-gateway-build.mts",
+      `
 import fs from "node:fs/promises";
 import path from "node:path";
 import {execFileSync} from "node:child_process";
@@ -300,169 +298,144 @@ fs.rename = async (source, destination) => {
 };
 process.exitCode = await runUpdateGatewayBuild(...process.argv.slice(2));
 `,
-      );
-      git(seed, "add", "scripts/update-gateway-build.mts");
-    }
-    if (trackedRuntime) {
-      fs.mkdirSync(path.join(seed, "dist"));
-      writeSeed(trackedAsset, "original tracked runtime\n");
-      git(seed, "add", "-f", trackedAsset);
-    }
-    if (trackedRuntime || interceptRename) {
-      publishSeed("runtime recovery fixture");
-    }
-    if (trackedRuntime) {
-      if (mode === "tracked-runtime-deleted") {
-        git(seed, "rm", trackedAsset);
-      } else {
-        writeSeed(trackedAsset, "target tracked runtime\n");
-        git(seed, "add", "-f", trackedAsset);
-      }
-    }
-    const runtimeWriter = path.join(shimDir, "write-runtime.cjs");
-    prepareRuntime("old");
-    writeShim(
-      "stop-ok",
-      [
-        'echo "stop:$(git rev-parse HEAD):$(cat node_modules/serving-marker)" >> "$UPDATE_TEST_LOG"',
-        ...(mode === "tracked-runtime-deleted" ||
-        mode === "tracked-runtime-rollback" ||
-        mode === "restore-branch-drift"
-          ? ['node "$UPDATE_TEST_BIN/corrupt-staged.cjs"']
-          : []),
-      ].join("\n"),
     );
-    fs.writeFileSync(
-      path.join(shimDir, "corrupt-staged.cjs"),
-      `
+  }
+  if (trackedRuntime) {
+    fs.mkdirSync(path.join(seed, "dist"));
+    stageSeed(trackedAsset, "original tracked runtime\n", true);
+  }
+  if (trackedRuntime || interceptRename) {
+    publishSeed("runtime recovery fixture");
+  }
+  if (trackedRuntime) {
+    if (mode === "tracked-runtime-deleted") {
+      git(seed, "rm", trackedAsset);
+    } else {
+      stageSeed(trackedAsset, "target tracked runtime\n", true);
+    }
+  }
+  const runtimeWriter = bin("write-runtime.cjs");
+  prepareRuntime("old");
+  writeShim(
+    "stop-ok",
+    'echo "stop:$(git rev-parse HEAD):$(cat node_modules/serving-marker)" >> "$UPDATE_TEST_LOG"',
+    (mode === "tracked-runtime-deleted" ||
+      mode === "tracked-runtime-rollback" ||
+      mode === "restore-branch-drift") &&
+      'node "$UPDATE_TEST_BIN/corrupt-staged.cjs"',
+  );
+  fs.writeFileSync(
+    bin("corrupt-staged.cjs"),
+    `
 const fs = require('node:fs');
 const path = require('node:path');
 const names = fs.readdirSync('.').filter(name => name.startsWith('dist.openclaw-update-'));
 if (names.length !== 1) throw new Error('Expected exactly one owned staged dist');
 fs.writeFileSync(path.join(names[0],'candidate','.buildstamp'), JSON.stringify({head:'invalid'}));
 `,
+  );
+  writeShim(
+    "restart-observe",
+    'echo "restart:$(git rev-parse HEAD):$(cat node_modules/serving-marker)" >> "$UPDATE_TEST_LOG"\nexit "${UPDATE_TEST_RESTART_EXIT:-0}"',
+  );
+  if (mode === "reset-refused") {
+    writeGit(
+      'if [ "$1" = -C ] && [ "$2" = "$UPDATE_TEST_LIVE_ROOT" ] && [ "$3" = reset ] && [ "$4" = --keep ]; then echo reset-refused >> "$UPDATE_TEST_LOG"; exit 17; fi',
     );
-    writeShim(
-      "restart-observe",
-      'echo "restart:$(git rev-parse HEAD):$(cat node_modules/serving-marker)" >> "$UPDATE_TEST_LOG"\nexit "${UPDATE_TEST_RESTART_EXIT:-0}"',
-    );
-    if (mode === "reset-refused") {
-      writeShim(
-        "git",
-        [
-          'if [ "$1" = -C ] && [ "$2" = "$UPDATE_TEST_LIVE_ROOT" ] && [ "$3" = reset ] && [ "$4" = --keep ]; then echo reset-refused >> "$UPDATE_TEST_LOG"; exit 17; fi',
-          'PATH="${PATH#*:}" exec git "$@"',
-        ].join("\n"),
-      );
-    }
-    const { result, original } = runRefusedSourceUpdate([], {
-      OPENCLAW_UPDATE_STOP_CMD: "stop-ok",
-      OPENCLAW_UPDATE_RESTART_CMD: "restart-observe",
-      UPDATE_TEST_RESTART_EXIT: mode === "restart-failed" ? "29" : "0",
-    });
-    expect(result.status, result.stdout + result.stderr).toBe(
-      mode === "tracked-runtime-changed" ? 0 : 1,
-    );
-    const published = mode === "restart-failed" || mode === "tracked-runtime-changed";
-    const expectedHead = published
-      ? git(path.join(scratch, "seed"), "rev-parse", "HEAD")
-      : original;
-    const expectedDependency = published ? "changed" : "original dependency";
-    expect(calls()).toContain(`stop:${original}:original dependency`);
-    if (mode === "restore-branch-drift") {
-      expect(result.stderr).toContain("Published source runtime could not be verified");
-      expect(result.stderr).toContain("Source checkout or branch changed during update");
-      expect(runtimeState()).toMatchObject({
-        branch: "operator-work",
-        head: git(seed, "rev-parse", "HEAD"),
-        dependency: "original dependency\n",
-        marker: "old",
-      });
-      expect(calls().some((call) => call.includes(`reset --keep ${original}`))).toBe(false);
-      expect(calls().some((call) => call.startsWith("restart:"))).toBe(false);
-      expect(retainedBackups().length > 0).toBe(true);
-      return;
-    }
-    if (mode === "tracked-runtime-partial") {
-      expect(calls()).toContain("candidate-rename-refused");
-      expect(result.stderr).toContain("candidate move refused");
-    }
-    if (mode.startsWith("tracked-runtime-")) {
-      if (mode === "tracked-runtime-deleted") {
-        expect(result.stderr).toContain("Published source runtime could not be verified");
-      }
-      expect(read(path.join(workdir, trackedAsset)), result.stdout + result.stderr).toBe(
-        published ? "target tracked runtime\n" : "original tracked runtime\n",
-      );
-      expect(git(workdir, "diff", "--name-only", "HEAD")).toBe("");
-    }
-    expect(calls()).toContain(`restart:${expectedHead}:${expectedDependency}`);
+  }
+  const { result, original } = runRefusedSourceUpdate([], {
+    OPENCLAW_UPDATE_STOP_CMD: "stop-ok",
+    OPENCLAW_UPDATE_RESTART_CMD: "restart-observe",
+    UPDATE_TEST_RESTART_EXIT: mode === "restart-failed" ? "29" : "0",
+  });
+  expectExit(result, mode === "tracked-runtime-changed" ? 0 : 1);
+  const published = mode === "restart-failed" || mode === "tracked-runtime-changed";
+  const expectedHead = published ? git(seed, "rev-parse", "HEAD") : original;
+  const expectedDependency = published ? "changed" : "original dependency";
+  expect(calls()).toContain(`stop:${original}:original dependency`);
+  if (mode === "restore-branch-drift") {
+    expect(result.stderr).toContain("Published source runtime could not be verified");
+    expect(result.stderr).toContain("Source checkout or branch changed during update");
     expect(runtimeState()).toMatchObject({
-      head: expectedHead,
-      branch: "main",
-      dependency: `${expectedDependency}\n`,
-      marker: published ? "new" : "old",
+      branch: "operator-work",
+      head: git(seed, "rev-parse", "HEAD"),
+      dependency: "original dependency\n",
+      marker: "old",
     });
-    const backups = retainedBackups();
-    expect(backups.length > 0).toBe(mode === "restart-failed");
-    expect(calls()).not.toContain("live-install");
-    if (mode === "restart-failed") {
-      const retained = new Map(
-        backups.map((name) => [name, fs.statSync(path.join(workdir, name)).ino]),
-      );
-      const retainedMarker = backups.find((name) => name.startsWith("dist.openclaw-update-"))!;
-      const originalMarker = path.join(workdir, retainedMarker, "previous/marker");
-      expect(read(originalMarker)).toBe("old");
-      const observation = path.join(scratch, "retry-inputs");
-      fs.appendFileSync(
-        runtimeWriter,
-        '\nfs.writeFileSync(process.env.UPDATE_TEST_RETRY_INPUTS, JSON.stringify(fs.readdirSync(".").filter(name => name.includes(".openclaw-update-"))));\n',
-      );
-      const retry = runUpdater({
-        OPENCLAW_UPDATE_STOP_CMD: "refuse-stop",
-        OPENCLAW_UPDATE_RESTART_CMD: "restart-proof",
-        UPDATE_TEST_RETRY_INPUTS: observation,
-      });
-      expect(retry.status, retry.stdout + retry.stderr).toBe(23);
-      expect(JSON.parse(read(observation))).toEqual([]);
-      expect(read(originalMarker)).toBe("old");
-      expect(
-        new Map(backups.map((name) => [name, fs.statSync(path.join(workdir, name)).ino])),
-      ).toEqual(retained);
-      expect(retainedBackups().toSorted()).toEqual(backups.toSorted());
+    expect(calls().some((call) => call.includes(`reset --keep ${original}`))).toBe(false);
+    expect(calls().some((call) => call.startsWith("restart:"))).toBe(false);
+    expect(retainedBackups().length > 0).toBe(true);
+    return;
+  }
+  if (mode === "tracked-runtime-partial") {
+    expect(calls()).toContain("candidate-rename-refused");
+    expect(result.stderr).toContain("candidate move refused");
+  }
+  if (mode.startsWith("tracked-runtime-")) {
+    if (mode === "tracked-runtime-deleted") {
+      expect(result.stderr).toContain("Published source runtime could not be verified");
     }
-  },
-);
+    expect(read(live(trackedAsset)), result.stdout + result.stderr).toBe(
+      published ? "target tracked runtime\n" : "original tracked runtime\n",
+    );
+    expect(git(workdir, "diff", "--name-only", "HEAD")).toBe("");
+  }
+  expect(calls()).toContain(`restart:${expectedHead}:${expectedDependency}`);
+  expect(runtimeState()).toMatchObject({
+    head: expectedHead,
+    branch: "main",
+    dependency: `${expectedDependency}\n`,
+    marker: published ? "new" : "old",
+  });
+  const backups = retainedBackups();
+  expect(backups.length > 0).toBe(mode === "restart-failed");
+  expect(calls()).not.toContain("live-install");
+  if (mode === "restart-failed") {
+    const backupInodes = () => new Map(backups.map((name) => [name, fs.statSync(live(name)).ino]));
+    const retained = backupInodes();
+    const retainedMarker = backups.find((name) => name.startsWith("dist.openclaw-update-"))!;
+    const originalMarker = live(`${retainedMarker}/previous/marker`);
+    expect(read(originalMarker)).toBe("old");
+    const observation = path.join(scratch, "retry-inputs");
+    fs.appendFileSync(
+      runtimeWriter,
+      '\nfs.writeFileSync(process.env.UPDATE_TEST_RETRY_INPUTS, JSON.stringify(fs.readdirSync(".").filter(name => name.includes(".openclaw-update-"))));\n',
+    );
+    const retry = runUpdater({
+      OPENCLAW_UPDATE_STOP_CMD: "refuse-stop",
+      OPENCLAW_UPDATE_RESTART_CMD: "restart-proof",
+      UPDATE_TEST_RETRY_INPUTS: observation,
+    });
+    expectExit(retry, 23);
+    expect(JSON.parse(read(observation))).toEqual([]);
+    expect(read(originalMarker)).toBe("old");
+    expect(backupInodes()).toEqual(retained);
+    expect(retainedBackups().toSorted()).toEqual(backups.toSorted());
+  }
+});
 
 it.each(["head-read", "tracked-change"] as const)(
   "reports reset refusal together with failed reconciliation (%s)",
   (mode) => {
     prepareRuntime("old");
     writeShim("stop-ok", 'echo stop-ok >> "$UPDATE_TEST_LOG"');
-    writeShim(
-      "git",
-      [
-        'if [ "$1" = -C ] && [ "$2" = "$UPDATE_TEST_LIVE_ROOT" ]; then',
-        '  if [ "$3" = reset ] && [ "$4" = --keep ]; then',
-        '    echo reset-refused >> "$UPDATE_TEST_LOG"',
-        ...(mode === "head-read"
-          ? ['    touch "$UPDATE_TEST_BIN/reset-failed"']
-          : ['    echo " " >> "$UPDATE_TEST_LIVE_ROOT/package.json"']),
-        "    exit 17",
-        "  fi",
-        ...(mode === "head-read"
-          ? [
-              '  if [ "$3" = rev-parse ] && [ "$4" = HEAD ] && [ -f "$UPDATE_TEST_BIN/reset-failed" ]; then exit 19; fi',
-            ]
-          : []),
-        "fi",
-        'PATH="${PATH#*:}" exec git "$@"',
-      ].join("\n"),
+    writeGit(
+      'if [ "$1" = -C ] && [ "$2" = "$UPDATE_TEST_LIVE_ROOT" ]; then',
+      '  if [ "$3" = reset ] && [ "$4" = --keep ]; then',
+      '    echo reset-refused >> "$UPDATE_TEST_LOG"',
+      mode === "head-read"
+        ? '    touch "$UPDATE_TEST_BIN/reset-failed"'
+        : '    echo " " >> "$UPDATE_TEST_LIVE_ROOT/package.json"',
+      "    exit 17",
+      "  fi",
+      mode === "head-read" &&
+        '  if [ "$3" = rev-parse ] && [ "$4" = HEAD ] && [ -f "$UPDATE_TEST_BIN/reset-failed" ]; then exit 19; fi',
+      "fi",
     );
     const { result, original } = runRefusedSourceUpdate([], {
       OPENCLAW_UPDATE_STOP_CMD: "stop-ok",
     });
-    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expectExit(result, 1);
     expect(calls()).toContain("reset-refused");
     expect(result.stderr).toContain("Source update Git reset failed (exit 17)");
     expect(result.stderr).toContain(
@@ -470,11 +443,7 @@ it.each(["head-read", "tracked-change"] as const)(
         ? "Source update Git rev-parse failed (exit 19)"
         : "Source update Git diff failed (exit 1)",
     );
-    expect(sourceState()).toMatchObject({
-      head: original,
-      dependency: "original dependency\n",
-      restarted: false,
-    });
+    expect(sourceState()).toMatchObject(unchangedSource(original));
     expect(retainedBackups().length > 0).toBe(true);
   },
 );
@@ -484,27 +453,19 @@ it.each(["cleanup-refused", "pack-advisory"] as const)(
   (mode) => {
     writeShim(
       "stop-with-cleanup-failure",
-      [
-        'echo stop-refused >> "$UPDATE_TEST_LOG"',
-        ...(mode === "cleanup-refused"
-          ? ['ln -s "$UPDATE_TEST_BIN" "$UPDATE_TEST_LIVE_ROOT/dist"']
-          : []),
-        "exit 23",
-      ].join("\n"),
+      'echo stop-refused >> "$UPDATE_TEST_LOG"',
+      mode === "cleanup-refused" && 'ln -s "$UPDATE_TEST_BIN" "$UPDATE_TEST_LIVE_ROOT/dist"',
+      "exit 23",
     );
     if (mode === "pack-advisory") {
-      writeShim(
-        "git",
-        [
-          'case "$*" in *objects/pack/pack-*.keep*) echo pack-cleanup-refused >> "$UPDATE_TEST_LOG"; exit 19;; esac',
-          'PATH="${PATH#*:}" exec git "$@"',
-        ].join("\n"),
+      writeGit(
+        'case "$*" in *objects/pack/pack-*.keep*) echo pack-cleanup-refused >> "$UPDATE_TEST_LOG"; exit 19;; esac',
       );
     }
     const { result, original } = runRefusedSourceUpdate([], {
       OPENCLAW_UPDATE_STOP_CMD: "stop-with-cleanup-failure",
     });
-    expect(result.status, result.stdout + result.stderr).toBe(mode === "cleanup-refused" ? 1 : 23);
+    expectExit(result, mode === "cleanup-refused" ? 1 : 23);
     expect(calls()).toContain("stop-refused");
     if (mode === "cleanup-refused") {
       expect(result.stderr).toContain("Source update stop failed (exit 23)");
@@ -514,11 +475,7 @@ it.each(["cleanup-refused", "pack-advisory"] as const)(
       expect(result.stderr.match(/Git update pack could not be removed:/gu)).toHaveLength(1);
       expect(retainedBackups().length > 0).toBe(false);
     }
-    expect(sourceState()).toMatchObject({
-      head: original,
-      dependency: "original dependency\n",
-      restarted: false,
-    });
+    expect(sourceState()).toMatchObject(unchangedSource(original));
   },
 );
 
@@ -529,7 +486,7 @@ it.each([
   "candidate-directory-file-rerouted",
   "candidate-directory-file-published",
 ] as const)("prepares accepted symlink build inputs (%s)", (kind) => {
-  const input = path.join(workdir, "inputs", "operator-link");
+  const input = live("inputs/operator-link");
   fs.mkdirSync(path.dirname(input));
   const payload = path.join(scratch, "external-input");
   let expected = "external input\n";
@@ -562,8 +519,7 @@ it.each([
     fs.symlinkSync(candidatePayload, path.join(seed, "assets"), "dir");
     git(seed, "add", "assets");
   } else if (kind === "physical-alias") {
-    writeSeed("target.txt", "old tracked source\n");
-    git(seed, "add", "target.txt");
+    stageSeed("target.txt", "old tracked source\n");
     publishSeed("old source input");
     const alias = path.join(scratch, "external-checkout-alias");
     fs.symlinkSync(workdir, alias, "dir");
@@ -579,7 +535,7 @@ it.each([
     writeShim("allow-restart", 'echo selected-restart >> "$UPDATE_TEST_LOG"');
   }
   const observation = path.join(scratch, "candidate-observation");
-  const { result, original, dependency } = runRefusedSourceUpdate(
+  const { result, original } = runRefusedSourceUpdate(
     [
       'cat inputs/operator-link > "$UPDATE_TEST_INPUT_OBSERVATION"',
       ...(rerouted
@@ -603,20 +559,20 @@ it.each([
   if (originalExternalFile) {
     expect(read(originalExternalFile)).toBe(expected);
   }
-  expect(result.status, result.stdout + result.stderr).toBe(changedInput ? 1 : published ? 0 : 23);
+  expectExit(result, changedInput ? 1 : published ? 0 : 23);
   expect(calls().includes("stop-refused")).toBe(!changedInput && !published);
   if (changedInput) {
     expect(result.stderr).toContain("Local source build inputs changed");
     expect(read(mutationTarget)).toBe("changed\n");
   }
-  expect(git(workdir, "rev-parse", "HEAD")).toBe(
-    published ? git(seed, "rev-parse", "HEAD") : original,
-  );
-  expect(read(dependency)).toBe(published ? "changed\n" : "original dependency\n");
+  expect(sourceState()).toEqual({
+    head: published ? git(seed, "rev-parse", "HEAD") : original,
+    dependency: published ? "changed\n" : "original dependency\n",
+    installed: false,
+    restarted: false,
+  });
   if (published) {
     expect(read(input)).toBe(expected);
     expect(calls()).toContain("selected-restart");
   }
-  expect(calls()).not.toContain("live-install");
-  expect(calls()).not.toContain("unexpected-restart");
 });
