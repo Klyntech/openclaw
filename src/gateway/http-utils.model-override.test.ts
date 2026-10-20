@@ -1,6 +1,3 @@
-/**
- * Tests HTTP model override parsing from gateway request headers and URLs.
- */
 import type { IncomingMessage } from "node:http";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
@@ -22,8 +19,12 @@ vi.mock("./server-model-catalog.js", () => ({
 
 import { resolveOpenAiCompatModelOverride } from "./http-utils.js";
 
-function createReq(headers: Record<string, string> = {}): IncomingMessage {
-  return { headers } as IncomingMessage;
+function override(model: string) {
+  return resolveOpenAiCompatModelOverride({
+    req: { headers: { "x-openclaw-model": model } } as IncomingMessage,
+    agentId: "main",
+    model: "openclaw",
+  });
 }
 
 describe("resolveOpenAiCompatModelOverride", () => {
@@ -76,32 +77,16 @@ describe("resolveOpenAiCompatModelOverride", () => {
       { provider: "custom/team", id: "Reader", name: "Other provider default" },
     ]);
 
-    await expect(
-      resolveOpenAiCompatModelOverride({
-        req: createReq({ "x-openclaw-model": "Reader" }),
-        agentId: "main",
-        model: "openclaw",
-      }),
-    ).resolves.toEqual({
+    await expect(override("Reader")).resolves.toEqual({
       errorMessage: "Model 'custom/team/Reader' is not allowed for agent 'main'.",
     });
-    await expect(
-      resolveOpenAiCompatModelOverride({
-        req: createReq({ "x-openclaw-model": "custom/team/Reader" }),
-        agentId: "main",
-        model: "openclaw",
-      }),
-    ).resolves.toEqual({ modelOverride: "custom/team/Reader" });
+    await expect(override("custom/team/Reader")).resolves.toEqual({
+      modelOverride: "custom/team/Reader",
+    });
   });
 
   it("rejects CLI model overrides outside the configured allowlist", async () => {
-    await expect(
-      resolveOpenAiCompatModelOverride({
-        req: createReq({ "x-openclaw-model": "claude-cli/opus" }),
-        agentId: "main",
-        model: "openclaw",
-      }),
-    ).resolves.toEqual({
+    await expect(override("claude-cli/opus")).resolves.toEqual({
       errorMessage: "Model 'claude-cli/opus' is not allowed for agent 'main'.",
     });
   });

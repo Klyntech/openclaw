@@ -7,6 +7,18 @@ import type { agentCommandMock as sharedAgentCommandMock } from "./test-helpers.
 
 type PostRequest = (port: number, body: unknown) => Promise<Response>;
 
+const chatMessage = (content: unknown, role = "user") => ({ role, content });
+const responseMessage = (content: unknown) => ({ type: "message", role: "user", content });
+const chatImage = (url = "data:image/png;base64,QUJDRA==") => ({
+  type: "image_url",
+  image_url: { url },
+});
+const uploadsDisabledError = {
+  type: "forbidden",
+  code: "UPLOADS_DISABLED",
+  message: "File and image uploads are disabled by gateway.uploads.enabled",
+};
+
 type HttpMediaSuite = {
   getPort: () => number;
   agentCommandMock: typeof sharedAgentCommandMock;
@@ -35,25 +47,33 @@ function publishUploads(enabled: boolean | undefined) {
   });
 }
 
+function disableUploadsDuringAdmission(agentCommandMock: HttpMediaSuite["agentCommandMock"]) {
+  publishUploads(true);
+  agentCommandMock.mockImplementationOnce(async (options) => {
+    if (!isRecord(options) || typeof options.assertSourceCurrent !== "function") {
+      throw new Error("Expected the HTTP command input admission guard");
+    }
+    publishUploads(false);
+    await options.assertSourceCurrent();
+    return { payloads: [], meta: { durationMs: 0, terminalReply: { disposition: "empty" } } };
+  });
+}
+
 export function registerOpenAiHttpUploadTests({
   getPort,
   postChatCompletions,
   firstAgentCommandOptions,
   agentCommandMock,
 }: OpenAiMediaSuite): void {
+  const post = (messages: unknown[], extra = {}) =>
+    postChatCompletions(getPort(), { model: "openclaw", messages, ...extra });
   describe("gateway upload policy", () => {
-    const imagePart = {
-      type: "image_url",
-      image_url: { url: "data:image/png;base64,QUJDRA==" },
-    };
+    const imagePart = chatImage();
 
     it.each([undefined, true])("allows image input when enabled=%s", async (enabled) => {
       publishUploads(enabled);
       agentCommandMock.mockResolvedValueOnce({ payloads: [{ text: "ok" }] } as never);
-      const res = await postChatCompletions(getPort(), {
-        model: "openclaw",
-        messages: [{ role: "user", content: [imagePart] }],
-      });
+      const res = await post([chatMessage([imagePart])]);
       expect(res.status, await res.text()).toBe(200);
       expect(firstAgentCommandOptions()?.images).toEqual([
         { type: "image", data: "QUJDRA==", mimeType: "image/png" },
@@ -64,7 +84,7 @@ export function registerOpenAiHttpUploadTests({
       { name: "inline image", part: imagePart, stream: false },
       {
         name: "URL image in a streaming request",
-        part: { type: "image_url", image_url: { url: "https://example.com/image.png" } },
+        part: chatImage("https://example.com/image.png"),
         stream: true,
       },
       {
@@ -77,26 +97,18 @@ export function registerOpenAiHttpUploadTests({
       },
       {
         name: "malformed image before decoding",
-        part: { type: "image_url", image_url: { url: "data:image/png;base64,%%%" } },
+        part: chatImage("data:image/png;base64,%%%"),
         stream: false,
       },
     ])("rejects $name without extraction or dispatch", async ({ part, stream }) => {
       publishUploads(false);
       const extraction = vi.spyOn(inputFiles, "extractImageContentFromSource");
       try {
-        const res = await postChatCompletions(getPort(), {
-          model: "openclaw",
+        const res = await post([chatMessage([{ type: "text", text: "Read this" }, part])], {
           stream,
-          messages: [{ role: "user", content: [{ type: "text", text: "Read this" }, part] }],
         });
         expect(res.status).toBe(403);
-        expect(await res.json()).toEqual({
-          error: {
-            type: "forbidden",
-            code: "UPLOADS_DISABLED",
-            message: "File and image uploads are disabled by gateway.uploads.enabled",
-          },
-        });
+        expect(await res.json()).toEqual({ error: uploadsDisabledError });
         expect(extraction).not.toHaveBeenCalled();
         expect(agentCommandMock).not.toHaveBeenCalled();
       } finally {
@@ -105,35 +117,21 @@ export function registerOpenAiHttpUploadTests({
     });
 
     it("rejects a hot disable during command input admission", async () => {
-      publishUploads(true);
-      agentCommandMock.mockImplementationOnce(async (options) => {
-        if (!isRecord(options) || typeof options.assertSourceCurrent !== "function") {
-          throw new Error("Expected the HTTP command input admission guard");
-        }
-        publishUploads(false);
-        await options.assertSourceCurrent();
-        return { payloads: [], meta: { durationMs: 0, terminalReply: { disposition: "empty" } } };
-      });
-      const res = await postChatCompletions(getPort(), {
-        model: "openclaw",
-        messages: [{ role: "user", content: [imagePart] }],
-      });
+      disableUploadsDuringAdmission(agentCommandMock);
+      const res = await post([chatMessage([imagePart])]);
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({
-        error: { message: "File and image uploads are disabled by gateway.uploads.enabled" },
+        error: { message: uploadsDisabledError.message },
       });
     });
 
     it("rejects historical image content instead of accepting an attachment bypass", async () => {
       publishUploads(false);
-      const res = await postChatCompletions(getPort(), {
-        model: "openclaw",
-        messages: [
-          { role: "user", content: [imagePart] },
-          { role: "assistant", content: "Earlier answer" },
-          { role: "user", content: "Follow up" },
-        ],
-      });
+      const res = await post([
+        chatMessage([imagePart]),
+        chatMessage("Earlier answer", "assistant"),
+        chatMessage("Follow up"),
+      ]);
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({ error: { code: "UPLOADS_DISABLED" } });
       expect(agentCommandMock).not.toHaveBeenCalled();
@@ -144,10 +142,7 @@ export function registerOpenAiHttpUploadTests({
       agentCommandMock.mockResolvedValueOnce({
         payloads: [{ text: "Generated image", mediaUrl: "https://example.com/generated.png" }],
       } as never);
-      const res = await postChatCompletions(getPort(), {
-        model: "openclaw",
-        messages: [{ role: "user", content: "Generate an image" }],
-      });
+      const res = await post([chatMessage("Generate an image")]);
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({
         choices: [{ message: { content: "Generated image" } }],
@@ -166,11 +161,7 @@ export function registerOpenAiHttpUploadTests({
             return { type: "image", data: "QUJDRA==", mimeType: "image/png" };
           });
         try {
-          const res = await postChatCompletions(getPort(), {
-            model: "openclaw",
-            stream,
-            messages: [{ role: "user", content: [imagePart] }],
-          });
+          const res = await post([chatMessage([imagePart])], { stream });
           expect(res.status).toBe(403);
           expect(await res.json()).toMatchObject({ error: { code: "UPLOADS_DISABLED" } });
           expect(agentCommandMock).not.toHaveBeenCalled();
@@ -189,6 +180,8 @@ export function registerOpenResponsesHttpUploadTests({
   agentCommandMock,
   fetchWithSsrFGuardMock,
 }: OpenResponsesMediaSuite & { fetchWithSsrFGuardMock: Mock }): void {
+  const post = (input: unknown, extra = {}) =>
+    postResponses(getPort(), { model: "openclaw", input, ...extra });
   describe("gateway upload policy", () => {
     const imagePart = {
       type: "input_image",
@@ -207,10 +200,7 @@ export function registerOpenResponsesHttpUploadTests({
     it.each([undefined, true])("allows image and file input when enabled=%s", async (enabled) => {
       publishUploads(enabled);
       agentCommandMock.mockResolvedValueOnce({ payloads: [{ text: "ok" }] } as never);
-      const res = await postResponses(getPort(), {
-        model: "openclaw",
-        input: [{ type: "message", role: "user", content: [imagePart, filePart] }],
-      });
+      const res = await post([responseMessage([imagePart, filePart])]);
       expect(res.status, await res.text()).toBe(200);
       expect(firstAgentOpts().images).toEqual([
         { type: "image", data: "QUJDRA==", mimeType: "image/png" },
@@ -244,25 +234,14 @@ export function registerOpenResponsesHttpUploadTests({
       const imageExtraction = vi.spyOn(inputFiles, "extractImageContentFromSource");
       const fileExtraction = vi.spyOn(inputFiles, "extractFileContentFromSource");
       try {
-        const res = await postResponses(getPort(), {
-          model: "openclaw",
-          stream,
-          input: [
-            {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "Read this" }, part],
-            },
-          ],
-        });
-        expect(res.status).toBe(403);
-        expect(await res.json()).toEqual({
-          error: {
-            type: "forbidden",
-            code: "UPLOADS_DISABLED",
-            message: "File and image uploads are disabled by gateway.uploads.enabled",
+        const res = await post(
+          [responseMessage([{ type: "input_text", text: "Read this" }, part])],
+          {
+            stream,
           },
-        });
+        );
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ error: uploadsDisabledError });
         expect(imageExtraction).not.toHaveBeenCalled();
         expect(fileExtraction).not.toHaveBeenCalled();
         expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
@@ -275,35 +254,18 @@ export function registerOpenResponsesHttpUploadTests({
 
     it("rejects historical file content instead of accepting an attachment bypass", async () => {
       publishUploads(false);
-      const res = await postResponses(getPort(), {
-        model: "openclaw",
-        input: [
-          { type: "message", role: "user", content: [filePart] },
-          { type: "message", role: "user", content: "Follow up" },
-        ],
-      });
+      const res = await post([responseMessage([filePart]), responseMessage("Follow up")]);
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({ error: { code: "UPLOADS_DISABLED" } });
       expect(agentCommandMock).not.toHaveBeenCalled();
     });
 
     it("rejects a hot disable during command input admission", async () => {
-      publishUploads(true);
-      agentCommandMock.mockImplementationOnce(async (options) => {
-        if (!isRecord(options) || typeof options.assertSourceCurrent !== "function") {
-          throw new Error("Expected the HTTP command input admission guard");
-        }
-        publishUploads(false);
-        await options.assertSourceCurrent();
-        return { payloads: [], meta: { durationMs: 0, terminalReply: { disposition: "empty" } } };
-      });
-      const res = await postResponses(getPort(), {
-        model: "openclaw",
-        input: [{ type: "message", role: "user", content: [filePart] }],
-      });
+      disableUploadsDuringAdmission(agentCommandMock);
+      const res = await post([responseMessage([filePart])]);
       expect(res.status).toBe(403);
       expect(await res.json()).toMatchObject({
-        error: { message: "File and image uploads are disabled by gateway.uploads.enabled" },
+        error: { message: uploadsDisabledError.message },
       });
     });
 
@@ -312,10 +274,7 @@ export function registerOpenResponsesHttpUploadTests({
       agentCommandMock.mockResolvedValueOnce({
         payloads: [{ text: "Generated image", mediaUrl: "https://example.com/generated.png" }],
       } as never);
-      const res = await postResponses(getPort(), {
-        model: "openclaw",
-        input: "Generate an image",
-      });
+      const res = await post("Generate an image");
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({
         output: [{ content: [{ text: "Generated image" }] }],
@@ -334,11 +293,7 @@ export function registerOpenResponsesHttpUploadTests({
             return { filename: "notes.txt", text: "uploaded text" };
           });
         try {
-          const res = await postResponses(getPort(), {
-            model: "openclaw",
-            stream,
-            input: [{ type: "message", role: "user", content: [filePart] }],
-          });
+          const res = await post([responseMessage([filePart])], { stream });
           expect(res.status).toBe(403);
           expect(await res.json()).toMatchObject({ error: { code: "UPLOADS_DISABLED" } });
           expect(agentCommandMock).not.toHaveBeenCalled();
@@ -365,24 +320,16 @@ export async function runOpenAiHttpImageInputCases({
   getFirstAgentMessage: () => string;
   expectInvalidRequestNoDispatch: (messages: unknown[]) => Promise<void>;
 }): Promise<void> {
+  const post = (messages: unknown[]) => postChatCompletions(port, { model: "openclaw", messages });
   {
     const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA";
     mockAgentOnce([{ text: "looks good" }]);
-    const res = await postChatCompletions(port, {
-      model: "openclaw",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "describe this" },
-            {
-              type: "image_url",
-              image_url: { url: `data:image/png;base64,${imageData}` },
-            },
-          ],
-        },
-      ],
-    });
+    const res = await post([
+      chatMessage([
+        { type: "text", text: "describe this" },
+        chatImage(`data:image/png;base64,${imageData}`),
+      ]),
+    ]);
     expect(res.status).toBe(200);
 
     const firstCall = getFirstAgentCall();
@@ -394,21 +341,12 @@ export async function runOpenAiHttpImageInputCases({
   {
     const imageData = "QUJDRA==";
     mockAgentOnce([{ text: "supports data-uri params" }]);
-    const res = await postChatCompletions(port, {
-      model: "openclaw",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "with metadata params" },
-            {
-              type: "image_url",
-              image_url: { url: `data:image/png;charset=utf-8;base64,${imageData}` },
-            },
-          ],
-        },
-      ],
-    });
+    const res = await post([
+      chatMessage([
+        { type: "text", text: "with metadata params" },
+        chatImage(`data:image/png;charset=utf-8;base64,${imageData}`),
+      ]),
+    ]);
     expect(res.status).toBe(200);
 
     const firstCall = getFirstAgentCall();
@@ -416,17 +354,7 @@ export async function runOpenAiHttpImageInputCases({
     await res.text();
   }
 
-  await expectInvalidRequestNoDispatch([
-    {
-      role: "user",
-      content: [
-        {
-          type: "image_url",
-          image_url: { url: "https://example.com/image.png" },
-        },
-      ],
-    },
-  ]);
+  await expectInvalidRequestNoDispatch([chatMessage([chatImage("https://example.com/image.png")])]);
 
   const malformedImageParts = [
     { type: "image_url" },
@@ -438,10 +366,7 @@ export async function runOpenAiHttpImageInputCases({
     { type: "image_url", image_url: "   " },
     { type: "image_url", image_url: 123 },
   ];
-  const validImagePart = {
-    type: "image_url",
-    image_url: { url: "data:image/png;base64,QUJDRA==" },
-  };
+  const validImagePart = chatImage();
   for (const imagePart of malformedImageParts) {
     for (const content of [
       [imagePart],
@@ -460,32 +385,13 @@ export async function runOpenAiHttpImageInputCases({
     "data:image/png;base64,JVBERi0xLjQK",
   ]) {
     await expectInvalidRequestNoDispatch([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "describe this" },
-          { type: "image_url", image_url: { url: malformedDataUri } },
-        ],
-      },
+      chatMessage([{ type: "text", text: "describe this" }, chatImage(malformedDataUri)]),
     ]);
   }
 
   {
     mockAgentOnce([{ text: "I can see the image" }]);
-    const res = await postChatCompletions(port, {
-      model: "openclaw",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: { url: "data:image/jpeg;base64,QUJDRA==" },
-            },
-          ],
-        },
-      ],
-    });
+    const res = await post([chatMessage([chatImage("data:image/jpeg;base64,QUJDRA==")])]);
     expect(res.status).toBe(200);
 
     const firstCall = getFirstAgentCall();
@@ -498,17 +404,11 @@ export async function runOpenAiHttpImageInputCases({
 
   {
     mockAgentOnce([{ text: "follow up answer" }]);
-    const res = await postChatCompletions(port, {
-      model: "openclaw",
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJDRA==" } }],
-        },
-        { role: "assistant", content: "I can see it." },
-        { role: "user", content: "What color was it?" },
-      ],
-    });
+    const res = await post([
+      chatMessage([chatImage()]),
+      chatMessage("I can see it.", "assistant"),
+      chatMessage("What color was it?"),
+    ]);
     expect(res.status).toBe(200);
 
     const firstCall = getFirstAgentCall();
@@ -517,26 +417,17 @@ export async function runOpenAiHttpImageInputCases({
     await res.text();
   }
 
-  for (const historicalImageParts of [
-    [{ type: "image_url", image_url: { url: "   " } }],
-    [validImagePart, { type: "image_url", image_url: { url: "   " } }],
-  ]) {
+  for (const historicalImageParts of [[chatImage("   ")], [validImagePart, chatImage("   ")]]) {
     for (const followup of [
       { role: "user", content: "What color was it?" },
       { role: "tool", content: "Vision tool says it is blue." },
     ]) {
       mockAgentOnce([{ text: "follow up answer" }]);
-      const res = await postChatCompletions(port, {
-        model: "openclaw",
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "look at this" }, ...historicalImageParts],
-          },
-          { role: "assistant", content: "Checking the image." },
-          followup,
-        ],
-      });
+      const res = await post([
+        chatMessage([{ type: "text", text: "look at this" }, ...historicalImageParts]),
+        chatMessage("Checking the image.", "assistant"),
+        followup,
+      ]);
       expect(res.status).toBe(200);
       expect(getFirstAgentCall()?.images).toBeUndefined();
       expect(getFirstAgentMessage()).toContain("User: look at this");
@@ -546,26 +437,11 @@ export async function runOpenAiHttpImageInputCases({
 
   {
     mockAgentOnce([{ text: "latest image only" }]);
-    const res = await postChatCompletions(port, {
-      model: "openclaw",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "first" },
-            { type: "image_url", image_url: { url: "data:image/png;base64,QUFBQQ==" } },
-          ],
-        },
-        { role: "assistant", content: "noted" },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "second" },
-            { type: "image_url", image_url: { url: "data:image/png;base64,QkJCQg==" } },
-          ],
-        },
-      ],
-    });
+    const res = await post([
+      chatMessage([{ type: "text", text: "first" }, chatImage("data:image/png;base64,QUFBQQ==")]),
+      chatMessage("noted", "assistant"),
+      chatMessage([{ type: "text", text: "second" }, chatImage("data:image/png;base64,QkJCQg==")]),
+    ]);
     expect(res.status).toBe(200);
 
     const firstCall = getFirstAgentCall();
@@ -595,107 +471,87 @@ export function registerOpenResponsesHttpMediaInputTests({
     text?: string;
   }) => unknown;
 }): void {
+  const post = (input: unknown, extra = {}) =>
+    postResponses(getPort(), { model: "openclaw", input, ...extra });
   it("blocks unsafe URL-based file/image inputs", async () => {
-    const port = getPort();
     agentCommandMock.mockClear();
 
-    const blockedPrivate = await postResponses(port, {
-      model: "openclaw",
-      input: buildUrlInputMessage({
+    const blockedPrivate = await post(
+      buildUrlInputMessage({
         kind: "input_file",
         url: "http://127.0.0.1:6379/info",
       }),
-    });
+    );
     await expectInvalidRequest(blockedPrivate, /invalid request|private|internal|blocked/i);
 
-    const blockedMetadata = await postResponses(port, {
-      model: "openclaw",
-      input: buildUrlInputMessage({
+    const blockedMetadata = await post(
+      buildUrlInputMessage({
         kind: "input_image",
         url: "http://metadata.google.internal/computeMetadata/v1",
       }),
-    });
+    );
     await expectInvalidRequest(blockedMetadata, /invalid request|blocked|metadata|internal/i);
 
-    const blockedScheme = await postResponses(port, {
-      model: "openclaw",
-      input: buildUrlInputMessage({
+    const blockedScheme = await post(
+      buildUrlInputMessage({
         kind: "input_file",
         url: "file:///etc/passwd",
       }),
-    });
+    );
     await expectInvalidRequest(blockedScheme, /invalid request|http or https/i);
     expect(agentCommandMock).not.toHaveBeenCalled();
   });
 
   it("accepts image-only input without text, matching /v1/chat/completions", async () => {
-    const port = getPort();
-    // 1x1 PNG; same fixture used by the parity schema tests.
     const pngBase64 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
     mockAgentOnce([{ text: "ok" }]);
 
-    const res = await postResponses(port, {
-      model: "openclaw",
-      input: [
+    const res = await post([
+      responseMessage([
         {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_image",
-              source: { type: "base64", media_type: "image/png", data: pngBase64 },
-            },
-          ],
+          type: "input_image",
+          source: { type: "base64", media_type: "image/png", data: pngBase64 },
         },
-      ],
-    });
+      ]),
+    ]);
 
     expect(res.status).toBe(200);
     expect(agentCommandMock).toHaveBeenCalledTimes(1);
     const opts = firstAgentOpts();
-    // Image-only turn carries a non-empty placeholder so the agent command runs,
-    // with the real image attached via `images` (parity with /v1/chat/completions).
-    expect((opts as { message?: string }).message ?? "").toBe(IMAGE_ONLY_USER_MESSAGE);
-    expect((opts as { images?: unknown[] }).images?.length).toBe(1);
+    expect(opts.message ?? "").toBe(IMAGE_ONLY_USER_MESSAGE);
+    expect(opts.images).toHaveLength(1);
     await ensureResponseConsumed(res);
   });
 
   it("accepts file-only input without text, matching image-only", async () => {
-    const port = getPort();
     mockAgentOnce([{ text: "ok" }]);
 
-    const res = await postResponses(port, {
-      model: "openclaw",
+    const res = await post(buildFileInputMessage("the quick brown fox", "doc.txt"), {
       instructions: "Summarize the attached document.",
-      input: buildFileInputMessage("the quick brown fox", "doc.txt"),
     });
 
     expect(res.status).toBe(200);
     expect(agentCommandMock).toHaveBeenCalledTimes(1);
     const opts = firstAgentOpts();
-    expect((opts as { message?: string }).message ?? "").not.toBe("");
-    const extraSystemPrompt = (opts as { extraSystemPrompt?: string }).extraSystemPrompt ?? "";
+    expect(opts.message ?? "").not.toBe("");
+    const extraSystemPrompt = opts.extraSystemPrompt ?? "";
     expect(extraSystemPrompt).toContain('<file name="doc.txt">');
     expect(extraSystemPrompt).toContain("the quick brown fox");
     await ensureResponseConsumed(res);
   });
 
   it("keeps base64 input_file text truncation UTF-16 safe", async () => {
-    const port = getPort();
     const text = `${"a".repeat(59_999)}😀tail`;
     mockAgentOnce([{ text: "ok" }]);
 
-    const res = await postResponses(port, {
-      model: "openclaw",
-      input: buildFileInputMessage(text, "emoji-boundary.txt"),
-    });
+    const res = await post(buildFileInputMessage(text, "emoji-boundary.txt"));
 
     expect(res.status).toBe(200);
     expect(agentCommandMock).toHaveBeenCalledTimes(1);
     const opts = firstAgentOpts();
-    const extraSystemPrompt = (opts as { extraSystemPrompt?: string }).extraSystemPrompt ?? "";
+    const extraSystemPrompt = opts.extraSystemPrompt ?? "";
     expect(extraSystemPrompt).toContain('<file name="emoji-boundary.txt">');
     expect(extraSystemPrompt).toContain("a".repeat(59_999));
     expect(extraSystemPrompt).not.toContain("😀");
@@ -704,13 +560,9 @@ export function registerOpenResponsesHttpMediaInputTests({
   });
 
   it("still rejects input with neither text nor image", async () => {
-    const port = getPort();
     agentCommandMock.mockClear();
 
-    const res = await postResponses(port, {
-      model: "openclaw",
-      input: [{ type: "message", role: "user", content: [] }],
-    });
+    const res = await post([responseMessage([])]);
 
     await expectInvalidRequest(res, /Missing user message/i);
     expect(agentCommandMock).not.toHaveBeenCalled();

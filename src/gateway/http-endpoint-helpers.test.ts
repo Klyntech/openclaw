@@ -1,6 +1,3 @@
-/**
- * Unit tests for the shared POST JSON endpoint helper used by gateway HTTP surfaces.
- */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
@@ -32,22 +29,7 @@ const { authorizeGatewayHttpRequestOrReply, resolveSharedSecretHttpOperatorScope
   await import("./http-utils.js");
 const { authorizeOperatorScopesForMethod } = await import("./method-scopes.js");
 
-type EndpointOptions = Parameters<typeof handleGatewayPostJsonEndpoint>[2];
 type RequestAuth = NonNullable<Awaited<ReturnType<typeof authorizeGatewayHttpRequestOrReply>>>;
-type RequestOptions = {
-  url?: string;
-  method?: string;
-  host?: string;
-};
-
-function request(options: RequestOptions = {}): IncomingMessage {
-  return {
-    url: options.url ?? "/v1/ok",
-    method: options.method ?? "POST",
-    headers: { host: options.host ?? "localhost" },
-  } as unknown as IncomingMessage;
-}
-
 function response(): ServerResponse {
   return {} as unknown as ServerResponse;
 }
@@ -62,27 +44,27 @@ function authorizedRequest(overrides: Partial<RequestAuth> = {}): RequestAuth {
   };
 }
 
-function endpointOptions(overrides: Partial<EndpointOptions> = {}): EndpointOptions {
-  return {
-    pathname: "/v1/ok",
-    auth: {} as unknown as ResolvedGatewayAuth,
-    requiredOperatorMethod: "chat.send",
-    maxBodyBytes: 123,
-    ...overrides,
-  };
-}
-
 function handleEndpoint(
   options: {
-    request?: RequestOptions;
+    url?: string;
+    method?: string;
+    host?: string;
     response?: ServerResponse;
-    endpoint?: Partial<EndpointOptions>;
   } = {},
 ) {
   return handleGatewayPostJsonEndpoint(
-    request(options.request),
+    {
+      url: options.url ?? "/v1/ok",
+      method: options.method ?? "POST",
+      headers: { host: options.host ?? "localhost" },
+    } as IncomingMessage,
     options.response ?? response(),
-    endpointOptions(options.endpoint),
+    {
+      pathname: "/v1/ok",
+      auth: {} as ResolvedGatewayAuth,
+      requiredOperatorMethod: "chat.send",
+      maxBodyBytes: 123,
+    },
   );
 }
 
@@ -120,22 +102,19 @@ describe("handleGatewayPostJsonEndpoint", () => {
   });
 
   it("returns false when path does not match", async () => {
-    const result = await handleEndpoint({ request: { url: "/nope" } });
-    expect(result).toBe(false);
+    expect(await handleEndpoint({ url: "/nope" })).toBe(false);
   });
 
   it("returns undefined and replies when method is not POST", async () => {
     const mockedSendMethodNotAllowed = vi.mocked(sendMethodNotAllowed);
     mockedSendMethodNotAllowed.mockClear();
-    const result = await handleEndpoint({ request: { method: "GET" } });
-    expect(result).toBeUndefined();
+    expect(await handleEndpoint({ method: "GET" })).toBeUndefined();
     expect(mockedSendMethodNotAllowed).toHaveBeenCalledTimes(1);
   });
 
   it("returns undefined when auth fails", async () => {
     vi.mocked(authorizeGatewayHttpRequestOrReply).mockResolvedValue(null);
-    const result = await handleEndpoint();
-    expect(result).toBeUndefined();
+    expect(await handleEndpoint()).toBeUndefined();
   });
 
   it("matches paths without trusting malformed Host headers", async () => {
@@ -143,9 +122,7 @@ describe("handleGatewayPostJsonEndpoint", () => {
     vi.mocked(authorizeGatewayHttpRequestOrReply).mockResolvedValue(requestAuth);
     vi.mocked(readJsonBodyOrError).mockResolvedValue({ ok: true });
 
-    const result = await handleEndpoint({ request: { host: "[" } });
-
-    expect(result).toEqual({
+    expect(await handleEndpoint({ host: "[" })).toEqual({
       body: { ok: true },
       requestAuth,
       operatorScopes: ["operator.write"],
@@ -166,11 +143,7 @@ describe("handleGatewayPostJsonEndpoint", () => {
     vi.mocked(readJsonBodyOrError).mockClear();
     const res = response();
 
-    const result = await handleEndpoint({
-      response: res,
-    });
-
-    expect(result).toBeUndefined();
+    expect(await handleEndpoint({ response: res })).toBeUndefined();
     expect(vi.mocked(authorizeOperatorScopesForMethod)).toHaveBeenCalledWith("chat.send", [
       "operator.approvals",
     ]);

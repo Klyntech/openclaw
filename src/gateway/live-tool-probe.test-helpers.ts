@@ -1,13 +1,9 @@
-// Gateway live tool probe utilities.
-// Classifies nonce probe replies and retry conditions for live provider checks.
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 
-/** Returns true when both expected tool-read nonces are present. */
 export function hasExpectedToolNonce(text: string, nonceA: string, nonceB: string): boolean {
   return text.includes(nonceA) && text.includes(nonceB);
 }
 
-/** Returns true when the expected exec-read nonce is present. */
 export function hasExpectedSingleNonce(text: string, nonce: string): boolean {
   return text.includes(nonce);
 }
@@ -51,13 +47,10 @@ const PROBE_REFUSAL_MARKERS = [
 /** Detects likely safety refusals for authorized nonce probes. */
 export function isLikelyToolNonceRefusal(text: string): boolean {
   const lower = normalizeLowercaseStringOrEmpty(text);
-  if (PROBE_REFUSAL_MARKERS.some((marker) => lower.includes(marker))) {
-    return true;
-  }
-  if (lower.includes("nonce")) {
-    return NONCE_REFUSAL_MARKERS.some((marker) => lower.includes(marker));
-  }
-  return false;
+  return (
+    PROBE_REFUSAL_MARKERS.some((marker) => lower.includes(marker)) ||
+    (lower.includes("nonce") && NONCE_REFUSAL_MARKERS.some((marker) => lower.includes(marker)))
+  );
 }
 
 function hasMalformedToolOutput(text: string): boolean {
@@ -69,7 +62,7 @@ function hasMalformedToolOutput(text: string): boolean {
   if (trimmed.includes("[object Object]")) {
     return true;
   }
-  if (
+  return (
     lower.includes("try reading the file again") ||
     lower.includes("try again with a slightly different approach") ||
     lower.includes("trying to read the file again") ||
@@ -78,74 +71,66 @@ function hasMalformedToolOutput(text: string): boolean {
     lower.includes("file wasn't found immediately") ||
     lower.includes("verify the file exists and read it again") ||
     lower.includes("file read failed because the file was not found") ||
-    lower.includes("verify the file creation and read it again")
-  ) {
-    return true;
-  }
-  if (/\bread\s*\[/.test(lower) || /\btool\b/.test(lower) || /\bfunction\b/.test(lower)) {
-    return true;
-  }
-  return false;
+    lower.includes("verify the file creation and read it again") ||
+    /\bread\s*\[/.test(lower) ||
+    /\btool\b/.test(lower) ||
+    /\bfunction\b/.test(lower)
+  );
 }
 
-/** Returns true when a file-read tool probe should retry before failing. */
-export function shouldRetryToolReadProbe(params: {
+type ProbeAttempt = {
   text: string;
-  nonceA: string;
-  nonceB: string;
   provider: string;
   attempt: number;
   maxAttempts: number;
   retryKnownNonceMismatch?: boolean;
-}): boolean {
-  if (params.attempt + 1 >= params.maxAttempts) {
+};
+
+/** Returns true when a file-read tool probe should retry before failing. */
+export function shouldRetryToolReadProbe(
+  params: ProbeAttempt & {
+    nonceA: string;
+    nonceB: string;
+  },
+): boolean {
+  if (
+    params.attempt + 1 >= params.maxAttempts ||
+    hasExpectedToolNonce(params.text, params.nonceA, params.nonceB)
+  ) {
     return false;
   }
-  if (hasExpectedToolNonce(params.text, params.nonceA, params.nonceB)) {
-    return false;
-  }
-  if (params.retryKnownNonceMismatch) {
-    return true;
-  }
-  if (hasMalformedToolOutput(params.text)) {
-    return true;
-  }
-  if (params.provider === "anthropic" && isLikelyToolNonceRefusal(params.text)) {
+  if (
+    params.retryKnownNonceMismatch ||
+    hasMalformedToolOutput(params.text) ||
+    (params.provider === "anthropic" && isLikelyToolNonceRefusal(params.text))
+  ) {
     return true;
   }
   const lower = normalizeLowercaseStringOrEmpty(params.text);
-  if (
+  return (
     params.provider === "mistral" &&
     (lower.includes("noncea=") ||
       lower.includes("nonceb=") ||
       lower.includes("testmarkera=") ||
       lower.includes("testmarkerb="))
-  ) {
-    return true;
-  }
-  return false;
+  );
 }
 
 /** Returns true when an exec-read probe should retry before failing. */
-export function shouldRetryExecReadProbe(params: {
-  text: string;
-  nonce: string;
-  provider: string;
-  attempt: number;
-  maxAttempts: number;
-  retryKnownNonceMismatch?: boolean;
-}): boolean {
-  if (params.attempt + 1 >= params.maxAttempts) {
+export function shouldRetryExecReadProbe(
+  params: ProbeAttempt & {
+    nonce: string;
+  },
+): boolean {
+  if (
+    params.attempt + 1 >= params.maxAttempts ||
+    hasExpectedSingleNonce(params.text, params.nonce)
+  ) {
     return false;
   }
-  if (hasExpectedSingleNonce(params.text, params.nonce)) {
-    return false;
-  }
-  if (params.retryKnownNonceMismatch) {
-    return true;
-  }
-  if (params.provider === "anthropic" && isLikelyToolNonceRefusal(params.text)) {
-    return true;
-  }
-  return hasMalformedToolOutput(params.text);
+  return (
+    params.retryKnownNonceMismatch === true ||
+    (params.provider === "anthropic" && isLikelyToolNonceRefusal(params.text)) ||
+    hasMalformedToolOutput(params.text)
+  );
 }
