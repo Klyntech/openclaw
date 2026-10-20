@@ -11,7 +11,7 @@ import * as pluginLifecycle from "../../plugins/plugin-lifecycle-lease.js";
 import { withCommandProcessScope } from "../../process/exec-spawn.js";
 import { VERSION } from "../../version.js";
 import { createUpdateCliBaseSnapshot } from "./update-cli-config.test-support.js";
-import type { PostCorePluginUpdateResult } from "./update-command-plugins.js";
+import { createPostCorePluginUpdateResult } from "./update-command-plugins-internals.js";
 
 const mocks = vi.hoisted(() => ({
   readConfig: vi.fn(),
@@ -60,17 +60,14 @@ import * as sourceRuntime from "./update-command-runtime.js";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 const snapshot = { ...createUpdateCliBaseSnapshot({}), path: "/isolated/openclaw.json" };
-const pluginUpdate: PostCorePluginUpdateResult = {
+const pluginUpdate = createPostCorePluginUpdateResult({
   status: "ok",
   changed: true,
-  sync: { changed: false, switchedToBundled: [], switchedToNpm: [], warnings: [], errors: [] },
-  npm: { changed: false, outcomes: [] },
-  integrityDrifts: [],
   warnings: [],
-};
+});
 const unchangedPluginUpdate = () => ({ ...pluginUpdate, changed: false });
-const unchangedCandidate = () => ({
-  pluginUpdate: unchangedPluginUpdate(),
+const candidateResult = (overrides: Partial<typeof pluginUpdate> = {}) => ({
+  pluginUpdate: { ...pluginUpdate, ...overrides },
   configSnapshot: snapshot,
 });
 function doctorOutput(args: string[]) {
@@ -86,7 +83,7 @@ beforeEach(() => {
   vi.mocked(shared.readPackageVersion).mockResolvedValue("2026.9.4");
   mocks.readConfig.mockReset().mockResolvedValue(snapshot);
   mocks.resolveEntrypoint.mockReset().mockResolvedValue("/isolated/dist/index.js");
-  mocks.convergeCandidate.mockReset().mockResolvedValue({ pluginUpdate, configSnapshot: snapshot });
+  mocks.convergeCandidate.mockReset().mockResolvedValue(candidateResult());
   mocks.runExec
     .mockReset()
     .mockImplementation(async (_command, args: string[]) => doctorOutput(args));
@@ -160,25 +157,21 @@ describe("candidate convergence Doctor dispatch authority", () => {
     );
     vi.spyOn(freshDoctor, "completePostCorePluginUpdate").mockImplementationOnce(async (params) => {
       params.onWarnings?.([earlyWarning, advisory, advisory]);
-      return {
-        pluginUpdate: {
-          ...pluginUpdate,
-          status: pending ? "warning" : "ok",
-          warnings: pending
-            ? [
-                {
-                  pluginId: migration.pluginId,
-                  reason: "doctor-advisory",
-                  message: finalWarning,
-                  guidance: [
-                    `Run "${migration.command}" to finish the plugin data/settings upgrade.`,
-                  ],
-                },
-              ]
-            : [],
-        },
-        configSnapshot: snapshot,
-      };
+      return candidateResult({
+        status: pending ? "warning" : "ok",
+        warnings: pending
+          ? [
+              {
+                pluginId: migration.pluginId,
+                reason: "doctor-advisory",
+                message: finalWarning,
+                guidance: [
+                  `Run "${migration.command}" to finish the plugin data/settings upgrade.`,
+                ],
+              },
+            ]
+          : [],
+      });
     });
     const { resultWithPostUpdate } = await converge({ candidateRuntime: true });
     expect(resultWithPostUpdate.status).toBe("ok");
@@ -267,7 +260,7 @@ describe("candidate convergence Doctor dispatch authority", () => {
       vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", undefined);
       vi.stubEnv("OPENCLAW_UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH", undefined);
       vi.mocked(shared.readPackageVersion).mockResolvedValue(VERSION);
-      mocks.convergeCandidate.mockResolvedValue(unchangedCandidate());
+      mocks.convergeCandidate.mockResolvedValue(candidateResult({ changed: false }));
 
       const { resultWithPostUpdate } = await converge({
         root,
@@ -321,7 +314,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         vi.spyOn(sourceRuntime, "completeSourceUpdateRuntime").mockResolvedValue({
           changed: false,
         });
-        mocks.convergeCandidate.mockResolvedValue(unchangedCandidate());
+        mocks.convergeCandidate.mockResolvedValue(candidateResult({ changed: false }));
       }
       const { resultWithPostUpdate: result } = await converge({
         candidateRuntime,
@@ -523,10 +516,7 @@ await fs.writeFile(process.env.OPENCLAW_UPDATE_POST_CORE_RESULT_PATH, ${JSON.str
         expect(process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION).toBe("2026.9.4");
         params.assertCurrent();
         events.push("candidate-plugins");
-        return {
-          pluginUpdate: { ...pluginUpdate, changed: changed === "plugins" },
-          configSnapshot: snapshot,
-        };
+        return candidateResult({ changed: changed === "plugins" });
       });
       const result = await converge({
         candidateRuntime: true,

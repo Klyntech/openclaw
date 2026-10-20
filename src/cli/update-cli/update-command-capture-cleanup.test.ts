@@ -127,22 +127,14 @@ const expectedPreview = (captures: Record<string, string>) =>
     ).map(([label, outcome, reason, bytes]) => [captures[label], { outcome, reason, bytes }]),
   );
 
-it.each(["current", "pre-migration"] as const)(
-  "previews %s update captures with their classification and bytes without removing them",
-  async (location) => {
-    await withCaptureHistory(async (captures) => {
-      const preview = await runCleanup({ dryRun: true });
-      expect(preview).toEqual({ status: "preview", captures: expectedPreview(captures) });
-      for (const directory of Object.values(captures)) {
-        expect(fs.existsSync(directory)).toBe(true);
-      }
-    }, location);
-  },
-);
-
-it.each(["current", "pre-migration"] as const)(
-  "removes only %s candidate captures and keeps protected captures",
-  async (location) => {
+it.each([
+  ["current", true],
+  ["current", false],
+  ["pre-migration", true],
+  ["pre-migration", false],
+] as const)(
+  "classifies %s captures and removes only candidates (dry-run=%s)",
+  async (location, dryRun) => {
     await withCaptureHistory(async (captures, root) => {
       using stderr = vi.spyOn(process.stderr, "write").mockImplementation((text) => {
         if (!String(text).startsWith("Removing capture ")) {
@@ -153,26 +145,30 @@ it.each(["current", "pre-migration"] as const)(
         expect(fs.existsSync(directory!)).toBe(true);
         return true;
       });
-      const result = await runCleanup({ yes: true });
-      expect(result.status).toBe("complete");
+      const result = await runCleanup({ dryRun, yes: !dryRun });
       const progress = stderr.mock.calls
         .map(([text]) => String(text))
         .filter((text) => text.startsWith("Removing capture "));
-      expect(progress).toHaveLength(3);
+      expect(progress).toHaveLength(dryRun ? 0 : 3);
       for (const [index, text] of progress.entries()) {
         expect(text).toMatch(
           new RegExp(`^Removing capture ${index + 1}/3: .+ \\(103[58] bytes\\)\\n$`),
         );
       }
-      const preview = expectedPreview(captures);
-      for (const [directory, item] of Object.entries(preview)) {
-        expect(result.captures[directory]).toEqual(
-          item.outcome === "candidate"
+      const expected = Object.entries(expectedPreview(captures)).map(([directory, item]) => {
+        const remove = !dryRun && item.outcome === "candidate";
+        expect(fs.existsSync(directory)).toBe(!remove);
+        return [
+          directory,
+          remove
             ? { outcome: "removed", reason: "update-capture-retired", bytes: item.bytes }
             : item,
-        );
-        expect(fs.existsSync(directory)).toBe(item.outcome !== "candidate");
-      }
+        ];
+      });
+      expect(result).toEqual({
+        status: dryRun ? "preview" : "complete",
+        captures: Object.fromEntries(expected),
+      });
       expect(fs.existsSync(path.join(root, UPDATE_CAPTURE_PRIVACY_MARKER))).toBe(true);
     }, location);
   },
