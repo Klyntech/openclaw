@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { InternalSessionEntry } from "../../config/sessions.js";
 
 const forkMocks = vi.hoisted(() => ({
-  forkSessionFromParent: vi.fn(),
-  resolveParentForkDecision: vi.fn(),
+  forkSessionFromParent: vi.fn(async () => ({ sessionId: "forked-session" })),
+  resolveParentForkDecision: vi.fn(async () => ({ status: "fork" })),
 }));
 
 vi.mock("./session-fork.js", () => forkMocks);
@@ -27,17 +27,7 @@ const prepare = (overrides: Partial<Parameters<typeof prepareReplySessionParentF
   });
 
 describe("prepareReplySessionParentFork", () => {
-  beforeEach(() => {
-    forkMocks.forkSessionFromParent.mockReset().mockResolvedValue({
-      sessionId: "forked-session",
-      sessionFile: "/tmp/forked-session.jsonl",
-    });
-    forkMocks.resolveParentForkDecision.mockReset().mockResolvedValue({
-      status: "fork",
-      maxTokens: 100_000,
-      parentTokens: 10_000,
-    });
-  });
+  beforeEach(() => vi.clearAllMocks());
 
   it("requires human mutation authority for tombstone parent replacement", () => {
     const entry: InternalSessionEntry = {

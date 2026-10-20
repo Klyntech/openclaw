@@ -4,29 +4,7 @@ import { createReplySessionEntryHandle } from "./session-entry-handle.js";
 
 const TEST_WORKSPACE_DIR = path.resolve("/tmp/workspace");
 
-const {
-  buildWorkspaceSkillSnapshotMock,
-  ensureSkillsWatcherMock,
-  getSkillsSnapshotVersionMock,
-  shouldRefreshSnapshotForVersionMock,
-  getRemoteSkillEligibilityMock,
-  updateSessionEntryMock,
-} = vi.hoisted(() => ({
-  buildWorkspaceSkillSnapshotMock: vi.fn((..._args: unknown[]) => ({
-    prompt: "",
-    skills: [] as unknown[],
-    resolvedSkills: [] as unknown[],
-  })),
-  ensureSkillsWatcherMock: vi.fn(),
-  getSkillsSnapshotVersionMock: vi.fn(() => 0),
-  shouldRefreshSnapshotForVersionMock: vi.fn((_cached?: number, _next?: number) => false),
-  getRemoteSkillEligibilityMock: vi.fn(() => ({
-    platforms: [],
-    hasBin: () => false,
-    hasAnyBin: () => false,
-  })),
-  updateSessionEntryMock: vi.fn(),
-}));
+const updateSessionEntryMock = vi.hoisted(() => vi.fn());
 
 // mock-isolation: Session classification is outside skill snapshot publication.
 vi.mock("../../agents/sandbox/runtime-status.js", () => ({
@@ -49,21 +27,21 @@ vi.mock("../../infra/exec-approvals-store.js", () => ({
 }));
 
 vi.mock("../../skills/runtime/remote.js", () => ({
-  getRemoteSkillEligibility: getRemoteSkillEligibilityMock,
+  getRemoteSkillEligibility: () => ({ platforms: [], hasBin: () => false, hasAnyBin: () => false }),
 }));
 
 vi.mock("../../skills/loading/workspace-skill-prompt.js", () => ({
-  buildSkillSnapshot: buildWorkspaceSkillSnapshotMock,
+  buildSkillSnapshot: () => ({ prompt: "", skills: [], resolvedSkills: [] }),
 }));
 
 vi.mock("../../skills/runtime/refresh.js", () => ({
-  ensureSkillsWatcher: ensureSkillsWatcherMock,
+  ensureSkillsWatcher: () => {},
 }));
 
 vi.mock("../../skills/runtime/refresh-state.js", () => ({
-  getSkillsSnapshotVersion: getSkillsSnapshotVersionMock,
-  getSkillsSourceVersion: getSkillsSnapshotVersionMock,
-  shouldRefreshSnapshotForVersion: shouldRefreshSnapshotForVersionMock,
+  getSkillsSnapshotVersion: () => 0,
+  getSkillsSourceVersion: () => 0,
+  shouldRefreshSnapshotForVersion: () => false,
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -80,6 +58,7 @@ vi.mock("../../config/sessions/session-accessor.sqlite-entry.js", () => ({
 const { ensureSkillSnapshot } = await import("./session-updates.js");
 
 const sessionKey = "agent:main:main";
+const storeScope = { sessionKey, storePath: "/tmp/sessions.json" };
 function skillFixture(
   sessionEntry: NonNullable<Parameters<typeof ensureSkillSnapshot>[0]["sessionEntry"]>,
 ) {
@@ -88,9 +67,8 @@ function skillFixture(
     agentId: "main",
     sessionEntry,
     sessionStore,
-    sessionKey,
+    ...storeScope,
     sessionId: sessionEntry.sessionId,
-    storePath: "/tmp/sessions.json",
     isFirstTurnInSession: true,
     workspaceDir: TEST_WORKSPACE_DIR,
     cfg: {},
@@ -99,18 +77,8 @@ function skillFixture(
 
 describe("ensureSkillSnapshot", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     vi.stubEnv("OPENCLAW_TEST_FAST", "0");
-    buildWorkspaceSkillSnapshotMock.mockReturnValue({ prompt: "", skills: [], resolvedSkills: [] });
-    getSkillsSnapshotVersionMock.mockReturnValue(0);
-    shouldRefreshSnapshotForVersionMock.mockReturnValue(false);
-    getRemoteSkillEligibilityMock.mockReturnValue({
-      platforms: [],
-      hasBin: () => false,
-      hasAnyBin: () => false,
-    });
-    updateSessionEntryMock.mockReset();
-    updateSessionEntryMock.mockResolvedValue(null);
+    updateSessionEntryMock.mockReset().mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -123,15 +91,11 @@ describe("ensureSkillSnapshot", () => {
     const result = await ensureSkillSnapshot({ ...fixture, sessionEntryHandle });
 
     expect(updateSessionEntryMock).toHaveBeenCalledWith(
-      {
-        storePath: "/tmp/sessions.json",
-        sessionKey,
-      },
+      storeScope,
       expect.objectContaining({ kind: "fields" }),
       expect.any(Object),
     );
-    expect(result.sessionEntry).toBeUndefined();
-    expect(result.systemSent).toBe(false);
+    expect(result).toMatchObject({ sessionEntry: undefined, systemSent: false });
     expect(sessionEntryHandle.getCurrent()).toBeUndefined();
     expect(fixture.sessionStore[sessionKey]).toBeUndefined();
   });
@@ -157,25 +121,25 @@ describe("ensureSkillSnapshot", () => {
           sendPolicy: "deny",
         };
         const patch = operation.patch;
-        expect(patch).not.toHaveProperty("sessionId");
         if (isFirstTurnInSession) {
           expect(patch).toHaveProperty("systemSent", true);
         } else {
           expect(patch).not.toHaveProperty("systemSent");
         }
-        expect(patch).not.toHaveProperty("modelOverride");
-        expect(patch).not.toHaveProperty("label");
-        expect(patch).not.toHaveProperty("pinnedAt");
-        expect(patch).not.toHaveProperty("sendPolicy");
+        for (const field of ["sessionId", "modelOverride", "label", "pinnedAt", "sendPolicy"]) {
+          expect(patch).not.toHaveProperty(field);
+        }
         return { ...concurrentEntry, ...patch };
       });
 
       const result = await ensureSkillSnapshot({ ...fixture, isFirstTurnInSession });
 
-      expect(result.sessionEntry?.modelOverride).toBe("sonnet-4.6");
-      expect(sessionStore[sessionKey]?.modelOverride).toBe("sonnet-4.6");
-      expect(result.sessionEntry).toMatchObject({ label: "After rename", sendPolicy: "deny" });
-      expect(result.sessionEntry?.pinnedAt).toBeUndefined();
+      expect(result.sessionEntry).toMatchObject({
+        modelOverride: "sonnet-4.6",
+        label: "After rename",
+        sendPolicy: "deny",
+      });
+      expect(result.sessionEntry).not.toHaveProperty("pinnedAt");
       expect(sessionStore[sessionKey]).toEqual(result.sessionEntry);
     },
   );

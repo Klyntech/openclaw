@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { disposeAllSessionMcpRuntimes } from "../../agents/agent-bundle-mcp-manager-api.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { withSessionTurn } from "../../sessions/session-controller.admission.js";
@@ -31,16 +31,8 @@ vi.mock("../../plugins/hook-runner-global.js", async (importOriginal) => ({
   getGlobalHookRunner: () => null,
 }));
 
-let suiteRoot = "";
-let suiteCase = 0;
-
-beforeAll(async () => {
-  suiteRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-rollover-preemption-"));
-});
-
-afterAll(async () => {
-  await fs.rm(suiteRoot, { recursive: true, force: true });
-});
+const tempDirs = createTempDirTracker();
+afterAll(tempDirs.cleanup);
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -48,14 +40,8 @@ afterEach(async () => {
   await closeOpenClawStateDatabaseAsync();
 });
 
-async function makeStorePath(): Promise<string> {
-  const dir = path.join(suiteRoot, String(++suiteCase));
-  await fs.mkdir(dir);
-  return path.join(dir, "sessions.json");
-}
-
 async function rolloverFixture(suffix: string) {
-  const storePath = await makeStorePath();
+  const storePath = path.join(tempDirs.make("openclaw-rollover-preemption-"), "sessions.json");
   const sessionKey = `agent:main:telegram:dm:rollover-${suffix}`;
   const sessionId = `session-before-${suffix}-rollover`;
   await writeSessionStoreFast(storePath, {

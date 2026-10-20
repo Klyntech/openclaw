@@ -4,10 +4,8 @@ import { resolveBareResetBootstrapFileAccess } from "./session-reset-prompt.js";
 const inventoryMocks = vi.hoisted(() => {
   const runtimeModel = {
     id: "dynamic-chat",
-    name: "dynamic-chat",
     provider: "dynamic-provider",
     api: "openai-responses",
-    baseUrl: "https://example.invalid/v1",
   };
   return {
     runtimeModel,
@@ -21,24 +19,7 @@ const inventoryMocks = vi.hoisted(() => {
         throw new Error("runtime model facts must be explicitly owner-published");
       }
       return {
-        agentId: "main",
-        profile: "coding",
-        groups: [
-          {
-            id: "core",
-            label: "Built-in tools",
-            source: "core",
-            tools: [
-              {
-                id: "read",
-                label: "Read",
-                description: "Read files",
-                rawDescription: "Read files",
-                source: "core",
-              },
-            ],
-          },
-        ],
+        groups: [{ tools: [{ id: "read" }] }],
       };
     }),
   };
