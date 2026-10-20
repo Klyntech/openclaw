@@ -400,22 +400,17 @@ it("limits orphan deletion per table while completing all sessions and FTS conte
   });
   db.exec("PRAGMA foreign_keys = ON");
   expectStatus(maintain(db), [], true);
-  for (const table of [
-    "session_transcript_active_events",
-    "session_transcript_fts_rows",
-    "session_transcript_fts",
-  ]) {
-    expect(db.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 1288 });
-  }
-  expectStatus(settle(db));
-  for (const table of [
+  const tables = [
     "session_transcript_active_events",
     "session_transcript_fts_rows",
     "session_transcript_fts",
     "session_transcript_index_state",
-  ]) {
-    expect(db.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
-  }
+  ];
+  const counts = (names: string[]) =>
+    names.map((table) => db.prepare(`SELECT count(*) AS count FROM ${table}`).get());
+  expect(counts(tables.slice(0, 3))).toEqual(Array.from({ length: 3 }, () => ({ count: 1288 })));
+  expectStatus(settle(db));
+  expect(counts(tables)).toEqual(Array.from({ length: 4 }, () => ({ count: 0 })));
 });
 
 it("cleans late orphans during continuous sibling commits and certifies readiness afterward", async () => {

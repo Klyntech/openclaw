@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
@@ -57,6 +57,11 @@ function fixture() {
 
 it("preserves exact 64-bit identities, duplicates and cold rows through deletion and rollback", () => {
   const { options, database } = fixture();
+  const expectedRows = [
+    { message_id: "duplicate", text: "first searchable", role: "user", timestamp: 10 },
+    { message_id: "duplicate", text: "second searchable", role: "assistant", timestamp: "10" },
+    { message_id: null, text: null, role: null, timestamp: null },
+  ];
   writeTransaction(({ db }) => {
     db.exec(`
       INSERT INTO session_transcript_fts_rows(id, session_id, message_id)
@@ -64,17 +69,10 @@ it("preserves exact 64-bit identities, duplicates and cold rows through deletion
       INSERT INTO session_transcript_fts(rowid, session_id, message_id, text, role, timestamp)
         VALUES (9007199254740992, 'other', 'duplicate', 'unrelated searchable', 'user', 11);
     `);
-    const insert = createFtsInserter(db, "session");
-    insert([
-      { messageId: "duplicate", text: "first searchable", role: "user", timestamp: 10 },
-      {
-        messageId: "duplicate",
-        text: "second searchable",
-        role: "assistant",
-        timestamp: "10",
-      },
-      { messageId: null, text: null, role: null, timestamp: null },
-    ]);
+    createFtsInserter(
+      db,
+      "session",
+    )(expectedRows.map(({ message_id, ...row }) => ({ ...row, messageId: message_id })));
   }, options);
   expect(
     rows(
@@ -90,11 +88,7 @@ it("preserves exact 64-bit identities, duplicates and cold rows through deletion
   const read = () =>
     executeSqliteQuerySync(database.db, selectFtsRows(database.db, "session")).rows;
   const before = read();
-  expect(before).toEqual([
-    { message_id: "duplicate", text: "first searchable", role: "user", timestamp: 10 },
-    { message_id: "duplicate", text: "second searchable", role: "assistant", timestamp: "10" },
-    { message_id: null, text: null, role: null, timestamp: null },
-  ]);
+  expect(before).toEqual(expectedRows);
 
   expect(() =>
     writeTransaction(({ db }) => {
@@ -198,17 +192,16 @@ function captureDeletePlans(db: DatabaseSync) {
   return { plans, restore: () => spy.mockRestore() };
 }
 
-describe("exact session transcript FTS ownership", () => {
-  it("replaces a suffix larger than SQLite's parameter limit without touching siblings", () => {
-    const db = projectionFixture();
-    const siblings = hits(db).filter((row) => row.session_id === "sibling");
-    const variableLimit = rows(db, "PRAGMA compile_options")
-      .map((row) => String(row.compile_options))
-      .find((option) => option.startsWith("MAX_VARIABLE_NUMBER="));
-    const bulkRows = Number(variableLimit?.split("=")[1] ?? 32766) + 1;
-    const totalRows = bulkRows + 4;
-    db.exec("BEGIN");
-    db.prepare(`WITH RECURSIVE rows(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM rows WHERE n<${bulkRows - 1})
+it("replaces a suffix larger than SQLite's parameter limit without touching siblings", () => {
+  const db = projectionFixture();
+  const siblings = hits(db).filter((row) => row.session_id === "sibling");
+  const variableLimit = rows(db, "PRAGMA compile_options")
+    .map((row) => String(row.compile_options))
+    .find((option) => option.startsWith("MAX_VARIABLE_NUMBER="));
+  const bulkRows = Number(variableLimit?.split("=")[1] ?? 32766) + 1;
+  const totalRows = bulkRows + 4;
+  db.exec("BEGIN");
+  db.prepare(`WITH RECURSIVE rows(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM rows WHERE n<${bulkRows - 1})
         INSERT INTO transcript_events (session_id, seq, event_json, created_at,
           navigation_type, navigation_custom_type, navigation_display, message_role,
           navigation_last_type, navigation_last_custom_type, navigation_valid)
@@ -218,9 +211,9 @@ describe("exact session transcript FTS ownership", () => {
             'message',json_object('role','user','content','needle bulk-'||n)), n+4,
           $navigation_type, $navigation_custom_type, $navigation_display, $message_role,
           $navigation_last_type, $navigation_last_custom_type, $navigation_valid FROM rows`).run(
-      deriveTranscriptPredicateFields('{"type":"message","message":{"role":"user"}}'),
-    );
-    db.exec(`
+    deriveTranscriptPredicateFields('{"type":"message","message":{"role":"user"}}'),
+  );
+  db.exec(`
         INSERT INTO session_transcript_active_events
           SELECT session_id,seq,seq,seq,1 FROM transcript_events WHERE session_id='target' AND seq>=4;
         INSERT INTO session_transcript_fts(text,session_id,message_id,role,timestamp)
@@ -232,83 +225,82 @@ describe("exact session transcript FTS ownership", () => {
         UPDATE session_transcript_index_state SET active_event_count=${totalRows},
           active_message_count=${totalRows}, indexed_seq=${totalRows - 1}, leaf_event_id='bulk-${bulkRows - 1}'
           WHERE session_id='target';`);
-    const removedMessageIds = [
-      ...Array.from({ length: 4 }, (_, i) => `target-${i}`),
-      ...Array.from({ length: bulkRows }, (_, i) => `bulk-${i}`),
-    ];
-    db.prepare("DELETE FROM transcript_events WHERE session_id='target'").run();
-    replaceIndexSuffix(db, "target", {
-      unchangedBeforeSeq: 0,
-      retainedActiveCount: 0,
-      removedMessageIds,
-      next: { activeRows: [], activeMessageCount: 0, indexedSeq: -1, leafEventId: null },
-    });
-    db.exec("COMMIT");
-    expect(hits(db)).toEqual(siblings);
-    expectMapped(db, 4);
+  const removedMessageIds = [
+    ...Array.from({ length: 4 }, (_, i) => `target-${i}`),
+    ...Array.from({ length: bulkRows }, (_, i) => `bulk-${i}`),
+  ];
+  db.prepare("DELETE FROM transcript_events WHERE session_id='target'").run();
+  replaceIndexSuffix(db, "target", {
+    unchangedBeforeSeq: 0,
+    retainedActiveCount: 0,
+    removedMessageIds,
+    next: { activeRows: [], activeMessageCount: 0, indexedSeq: -1, leafEventId: null },
   });
+  db.exec("COMMIT");
+  expect(hits(db)).toEqual(siblings);
+  expectMapped(db, 4);
+});
 
-  it("reconciles by point lookup and preserves interleaved siblings", () => {
-    const db = projectionFixture();
-    const expected = hits(db);
-    const capture = captureDeletePlans(db);
-    db.exec("BEGIN");
-    markIndexDirty(db, "target");
-    expect(reconcileIndex(db, "target")).toBe(true);
-    db.exec("COMMIT");
-    capture.restore();
-    expect(
-      capture.plans.filter((plan) =>
-        plan.includes("idx_session_transcript_fts_rows_session_message"),
-      ),
-    ).toEqual([expect.stringContaining("idx_session_transcript_fts_rows_session_message")]);
-    expect(hits(db)).toEqual(expected);
-    expectMapped(db, 8);
-    db.exec("BEGIN");
-    deleteIndex(db, "target");
-    db.exec("COMMIT");
-    expect(hits(db)).toEqual(expected.filter((row) => row.session_id === "sibling"));
-    expectMapped(db, 4);
-  });
+it("reconciles by point lookup and preserves interleaved siblings", () => {
+  const db = projectionFixture();
+  const expected = hits(db);
+  const capture = captureDeletePlans(db);
+  db.exec("BEGIN");
+  markIndexDirty(db, "target");
+  expect(reconcileIndex(db, "target")).toBe(true);
+  db.exec("COMMIT");
+  capture.restore();
+  expect(
+    capture.plans.filter((plan) =>
+      plan.includes("idx_session_transcript_fts_rows_session_message"),
+    ),
+  ).toEqual([expect.stringContaining("idx_session_transcript_fts_rows_session_message")]);
+  expect(hits(db)).toEqual(expected);
+  expectMapped(db, 8);
+  db.exec("BEGIN");
+  deleteIndex(db, "target");
+  db.exec("COMMIT");
+  expect(hits(db)).toEqual(expected.filter((row) => row.session_id === "sibling"));
+  expectMapped(db, 4);
+});
 
-  it("keeps worker chunks and interrupted rebuilds mapped with missing content", () => {
-    const db = projectionFixture();
-    const expected = hits(db);
-    db.prepare("DELETE FROM session_transcript_fts WHERE message_id='target-1'").run();
-    markIndexDirty(db, "target");
-    const plan = prepareProjection(db, "target")!;
-    for (const claimId of [-1, -2]) {
+it("keeps worker chunks and interrupted rebuilds mapped with missing content", () => {
+  const db = projectionFixture();
+  const expected = hits(db);
+  db.prepare("DELETE FROM session_transcript_fts WHERE message_id='target-1'").run();
+  markIndexDirty(db, "target");
+  const plan = prepareProjection(db, "target")!;
+  for (const claimId of [-1, -2]) {
+    db.exec("BEGIN");
+    expect(claimProjection(db, plan, claimId)).toBe(true);
+    db.exec("COMMIT");
+    let more = true;
+    while (more) {
       db.exec("BEGIN");
-      expect(claimProjection(db, plan, claimId)).toBe(true);
-      db.exec("COMMIT");
-      let more = true;
-      while (more) {
-        db.exec("BEGIN");
-        const result = deleteProjectionChunk(db, {
-          sessionId: "target",
-          maxRowsPerTable: 2,
-        });
-        more = result.hasMore;
-        db.exec("COMMIT");
-        expectMapped(
-          db,
-          Number(db.prepare("SELECT count(*) n FROM session_transcript_fts").get()?.n),
-        );
-      }
-      db.exec("BEGIN");
-      appendProjectionChunk(db, {
+      const result = deleteProjectionChunk(db, {
         sessionId: "target",
-        activeRows: claimId === -1 ? [] : plan.activeRows,
-        ftsRows: claimId === -1 ? plan.ftsRows.slice(0, 1) : plan.ftsRows,
+        maxRowsPerTable: 2,
       });
-      if (claimId === -2) {
-        expect(finalizeProjection(db, plan, claimId)).toBe(true);
-      }
+      more = result.hasMore;
       db.exec("COMMIT");
+      expectMapped(
+        db,
+        Number(db.prepare("SELECT count(*) n FROM session_transcript_fts").get()?.n),
+      );
     }
-    expectMapped(db, 8);
-    expect(hits(db)).toEqual(expected);
-  });
+    db.exec("BEGIN");
+    appendProjectionChunk(db, {
+      sessionId: "target",
+      activeRows: claimId === -1 ? [] : plan.activeRows,
+      ftsRows: claimId === -1 ? plan.ftsRows.slice(0, 1) : plan.ftsRows,
+    });
+    if (claimId === -2) {
+      expect(finalizeProjection(db, plan, claimId)).toBe(true);
+    }
+    db.exec("COMMIT");
+  }
+  expectMapped(db, 8);
+  expect(hits(db)).toEqual(expected);
 });
 
 function message(
@@ -439,9 +431,5 @@ it.each([
     insert.run(index + 1, JSON.stringify(event), createdAt?.[index] ?? (index + 1) * 1_000),
   );
   const result = prepareProjection(db, "target");
-  expect(result).toMatchObject(expected);
-  if (expected.activeRows) {
-    expect(result?.activeRows).toEqual(expected.activeRows);
-  }
-  expect(result?.ftsRows).toEqual(expected.ftsRows);
+  expect(result).toEqual(expect.objectContaining(expected));
 });
