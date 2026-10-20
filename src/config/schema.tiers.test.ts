@@ -3,9 +3,11 @@ import { buildConfigSchemaCore } from "./schema.js";
 import type { ConfigJsonSchemaObject } from "./schema.shared.js";
 import { applyResolvedConfigTierHints } from "./schema.tiers.js";
 
-function customSchema(properties: Record<string, ConfigJsonSchemaObject>): ConfigJsonSchemaObject {
-  return { type: "object", properties: { custom: { type: "object", properties } } };
-}
+const objectSchema = (
+  properties: Record<string, ConfigJsonSchemaObject>,
+): ConfigJsonSchemaObject => ({ type: "object", properties });
+const customSchema = (properties: Record<string, ConfigJsonSchemaObject>) =>
+  objectSchema({ custom: objectSchema(properties) });
 
 describe("config schema tiers", () => {
   let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
@@ -93,16 +95,12 @@ describe("config schema tiers", () => {
     (explicitCommon) => {
       const hints = applyResolvedConfigTierHints(
         customSchema({
-          group: {
-            type: "object",
-            properties: {
-              item: {
-                type: "object",
-                properties: { value: { type: "string" } },
-                additionalProperties: { type: "integer" },
-              },
+          group: objectSchema({
+            item: {
+              ...objectSchema({ value: { type: "string" } }),
+              additionalProperties: { type: "integer" },
             },
-          },
+          }),
         }),
         {
           custom: { advanced: false },

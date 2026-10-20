@@ -7,6 +7,19 @@ import { OpenClawSchema } from "./zod-schema.js";
 import { OpenClawSchemaShape } from "./zod-schema.root-shape.js";
 import { sensitive } from "./zod-schema.sensitive.js";
 
+const secret = () => z.string().register(sensitive);
+const branches = () =>
+  [
+    z.object({ type: z.literal("none") }),
+    z.object({ type: z.literal("token"), value: secret() }),
+  ] as const;
+function expectSensitive(hints: ReturnType<typeof mapSensitivePaths>, paths: string) {
+  const fields = paths.trim().split(/\s+/);
+  expect(hints).toMatchObject(
+    Object.fromEntries(fields.map((path) => [path, { sensitive: true }])),
+  );
+}
+
 const { SECTION_DOCS_URLS } = testApi;
 // Root sections without beginner-worthy pages stay explicit. Adding a root config key
 // requires choosing a docsUrl or listing it here.
@@ -35,58 +48,38 @@ it("describes omitted settings without adding them to authored config", () => {
 });
 
 it("should detect sensitive fields nested inside all structural Zod types", () => {
-  const secret = () => z.string().register(sensitive);
   const GrandSchema = z.object({
     simple: secret().optional(),
     simpleReversed: z.string().optional().register(sensitive),
-    nested: z.object({
-      nested: secret(),
-    }),
+    nested: z.object({ nested: secret() }),
     list: z.array(secret()),
     listOfObjects: z.array(z.object({ nested: secret() })),
     headers: z.record(z.string(), secret()),
     headersNested: z.record(z.string(), z.object({ nested: secret() })),
-    auth: z.union([
-      z.object({ type: z.literal("none") }),
-      z.object({ type: z.literal("token"), value: secret() }),
-    ]),
+    auth: z.union(branches()),
     merged: z.object({ id: z.string() }).and(z.object({ nested: secret() })),
     deferred: z.lazy(() => z.object({ value: secret() })),
     defaulted: secret().default("synthetic"),
     nullable: secret().nullable().readonly(),
     preprocessed: z.preprocess((value) => value, z.object({ value: secret() })),
-    discriminated: z.discriminatedUnion("type", [
-      z.object({ type: z.literal("none") }),
-      z.object({ type: z.literal("token"), value: secret() }),
-    ]),
+    discriminated: z.discriminatedUnion("type", branches()),
   });
 
   const result = mapSensitivePaths(GrandSchema, "", {});
 
-  expect(result["simple"]?.sensitive).toBe(true);
-  expect(result["simpleReversed"]?.sensitive).toBe(true);
-  expect(result["nested.nested"]?.sensitive).toBe(true);
-  expect(result["list[]"]?.sensitive).toBe(true);
-  expect(result["listOfObjects[].nested"]?.sensitive).toBe(true);
-  expect(result["headers.*"]?.sensitive).toBe(true);
-  expect(result["headersNested.*.nested"]?.sensitive).toBe(true);
-  expect(result["auth.value"]?.sensitive).toBe(true);
-  expect(result["merged.nested"]?.sensitive).toBe(true);
-  expect(result["deferred.value"]?.sensitive).toBe(true);
-  expect(result["defaulted"]?.sensitive).toBe(true);
-  expect(result["nullable"]?.sensitive).toBe(true);
-  expect(result["preprocessed.value"]?.sensitive).toBe(true);
-  expect(result["discriminated.value"]?.sensitive).toBe(true);
+  expectSensitive(
+    result,
+    `
+    simple simpleReversed nested.nested list[] listOfObjects[].nested headers.*
+    headersNested.*.nested auth.value merged.nested deferred.value defaulted
+    nullable preprocessed.value discriminated.value
+  `,
+  );
 });
 
 it("maps sensitive fields nested under object catchall schemas", () => {
   const schema = z.object({
-    custom: z.object({}).catchall(
-      z.object({
-        apiKey: z.string().register(sensitive),
-        label: z.string(),
-      }),
-    ),
+    custom: z.object({}).catchall(z.object({ apiKey: secret(), label: z.string() })),
   });
 
   const result = mapSensitivePaths(schema, "", {});
@@ -97,16 +90,16 @@ it("maps sensitive fields nested under object catchall schemas", () => {
 it("main schema yields correct hints (samples)", () => {
   const hints = mapSensitivePaths(OpenClawSchema, "", {});
 
-  expect(hints["memory.search.remote.apiKey"]?.sensitive).toBe(true);
-  expect(hints["agents.entries.*.memory.search.remote.apiKey"]?.sensitive).toBe(true);
-  expect(hints["gateway.auth.token"]?.sensitive).toBe(true);
-  expect(hints["models.providers.*.headers.*"]?.sensitive).toBe(true);
-  expect(hints["models.providers.*.localService.env.*"]?.sensitive).toBe(true);
-  expect(hints["models.providers.*.request.headers.*"]?.sensitive).toBe(true);
-  expect(hints["models.providers.*.request.proxy.tls.cert"]?.sensitive).toBe(true);
-  expect(hints["proxy.proxyUrl"]?.sensitive).toBe(true);
+  expectSensitive(
+    hints,
+    `
+    memory.search.remote.apiKey agents.entries.*.memory.search.remote.apiKey gateway.auth.token
+    models.providers.*.headers.* models.providers.*.localService.env.*
+    models.providers.*.request.headers.* models.providers.*.request.proxy.tls.cert
+    proxy.proxyUrl skills.entries.*.apiKey
+  `,
+  );
   expect(hints["proxy.tls.caFile"]?.sensitive).toBeUndefined();
-  expect(hints["skills.entries.*.apiKey"]?.sensitive).toBe(true);
 });
 
 it("tags base-config URL fields that may embed secrets", () => {
@@ -122,7 +115,7 @@ it("tags base-config URL fields that may embed secrets", () => {
 });
 
 it("preserves authored metadata without deriving tags from field names or tiers", () => {
-  const result = buildConfigSchemaCore({
+  const { uiHints: hints } = buildConfigSchemaCore({
     plugins: [
       {
         id: "authored-metadata",
@@ -149,18 +142,16 @@ it("preserves authored metadata without deriving tags from field names or tiers"
       },
     ],
   });
-  const hints = result.uiHints;
   expect(hints["gateway.auth.token"]?.tags).toBeUndefined();
-  expect(hints["plugins.entries.authored-metadata.config.maxTokens"]).toMatchObject({
-    sensitive: false,
-  });
-  expect(hints["plugins.entries.authored-metadata.config.maxTokens"]?.tags).toBeUndefined();
-  expect(hints["plugins.entries.authored-metadata.config.storagePath"]).toMatchObject({
+  const plugin = (key: string) => hints[`plugins.entries.authored-metadata.config.${key}`];
+  expect(plugin("maxTokens")).toMatchObject({ sensitive: false });
+  expect(plugin("maxTokens")?.tags).toBeUndefined();
+  expect(plugin("storagePath")).toMatchObject({
     tags: ["User-defined"],
     advanced: true,
   });
-  expect(hints["plugins.entries.authored-metadata.config.apiKey"]?.sensitive).toBe(true);
-  expect(hints["plugins.entries.authored-metadata.config.apiKey"]?.tags).toBeUndefined();
+  expect(plugin("apiKey")?.sensitive).toBe(true);
+  expect(plugin("apiKey")?.tags).toBeUndefined();
   expect(hints["channels.authored-metadata-channel.retryLimit"]?.tags).toEqual(["Tuning"]);
   expect(hints["mcp.servers.*.url"]?.tags).toContain(SENSITIVE_URL_HINT_TAG);
 });
