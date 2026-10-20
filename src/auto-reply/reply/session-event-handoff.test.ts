@@ -2,7 +2,7 @@ import "../../test-utils/prepare-compiled-subprocesses.js";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it as baseIt, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -177,6 +177,17 @@ async function withTargetFixture(
   );
 }
 
+type TargetFixture = OpenClawTestState & { storePath: string };
+const it = baseIt.extend<{
+  state: TargetFixture;
+  nativeState: TargetFixture;
+  coldState: TargetFixture;
+}>({
+  state: async ({ task: _task }, use) => withTargetFixture(use),
+  nativeState: async ({ task: _task }, use) => withTargetFixture(use, { native: true }),
+  coldState: async ({ task: _task }, use) => withTargetFixture(use, { empty: true, native: true }),
+});
+
 beforeEach(() => {
   eventLogError.mockClear();
   continuation.mockClear();
@@ -190,114 +201,107 @@ afterAll(() => {
 });
 
 describe("session event target custody", () => {
-  it("cleans up a settled cron event in its captured state and store", async ({ signal }) => {
-    await withTargetFixture(
-      async (state) => {
-        const baseKey = "agent:main:cron:captured-store";
-        const runKey = `${baseKey}:run:original`;
-        const captured = {
-          agentId: "main",
-          env: { ...state.env, OPENCLAW_STATE_DIR: state.path("captured-state") },
-          storePath: state.path("captured-sessions.sqlite"),
-        };
-        const replacement = { agentId: "main", env: state.env, storePath: state.storePath };
-        openOpenClawStateDatabase({ env: captured.env });
-        for (const [scope, sessionId] of [
-          [captured, "captured-session"],
-          [replacement, "replacement-session"],
-        ] as const) {
-          await replaceSessionEntry({ ...scope, sessionKey: baseKey }, { sessionId, updatedAt: 1 });
-          await replaceSessionEntry(
-            { ...scope, sessionKey: runKey },
-            {
-              sessionId,
-              updatedAt: 1,
-              cronRunContinuation: {
-                lifecycleRevision: "original",
-                phase: "ready",
-                basePersisted: true,
-              },
-            },
-          );
-        }
-        const cfg = { agents: { entries: { main: {} } } };
-        setRuntimeConfigSnapshot({ ...cfg, session: { store: captured.storePath } });
-        const target = await captureSessionEventTargetForHost("main", runKey, {
-          env: captured.env,
-        });
-        setRuntimeConfigSnapshot({ ...cfg, session: { store: replacement.storePath } });
-        const receipt = enqueueSessionEventForHost("Process completed", {
-          agentId: "main",
-          sessionKey: runKey,
-          source: "exec",
-          expectedTarget: target,
-        });
-        receipt.cancel();
-        expect(await withinTest(receipt.settled, signal)).toMatchObject({ status: "cancelled" });
-        await withinTest(joinContinuations(), signal);
-        expect(loadSessionEntry({ ...captured, sessionKey: runKey })).toBeUndefined();
-        expect(loadSessionEntry({ ...captured, sessionKey: baseKey })?.sessionId).toBe(
-          "captured-session",
-        );
-        expect(loadSessionEntry({ ...replacement, sessionKey: runKey })?.sessionId).toBe(
-          "replacement-session",
-        );
-      },
-      { empty: true, native: true },
-    );
-  });
-
-  it("rejects deletion-revoked events with worker-prepared authority and no native journal reads", async () => {
-    await withTargetFixture(
-      async (state) => {
-        const { env, storePath } = state;
-        const observed = observeHostDataSql();
-        const target = await captureSessionEventTargetForHost("main", sessionKey, { env }).finally(
-          observed.restore,
-        );
-        expect(observed.queries.filter((sql) => /\bagent_deletion_journal\b/i.test(sql))).toEqual(
-          [],
-        );
-        expect(target).toMatchObject({
-          agentId: "main",
-          sessionKey,
-          sessionId: "original-session",
-          lifecycleRevision: "original-revision",
-          storePath,
-          deliveryContext: route,
-          settings: { permissionMode: "full" },
-        });
-        expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
-        await withAgentDeletion(
-          "main",
-          async (begin) => {
-            const deletion = await begin({
-              agentId: "main",
-              agentDir: state.agentDir("main"),
-              workspaceDir: state.path("workspace"),
-              sessionsDir: state.sessionsDir("main"),
-              phase: "draining",
-            });
-            expect(() => assertSessionEventTargetCurrent(target)).toThrow(
-              "Session event owner is being deleted",
-            );
-            for (const expectedTarget of [target, undefined]) {
-              const receipt = enqueueCompletion(expectedTarget);
-              await expectStopped(receipt, "failed", "Session event agent is being deleted");
-            }
-            expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-            await deletion.rollback();
+  it("cleans settled cron events from their captured store", async ({
+    signal,
+    coldState: state,
+  }) => {
+    const baseKey = "agent:main:cron:captured-store";
+    const runKey = `${baseKey}:run:original`;
+    const captured = {
+      agentId: "main",
+      env: { ...state.env, OPENCLAW_STATE_DIR: state.path("captured-state") },
+      storePath: state.path("captured-sessions.sqlite"),
+    };
+    const replacement = { agentId: "main", env: state.env, storePath: state.storePath };
+    openOpenClawStateDatabase({ env: captured.env });
+    for (const [scope, sessionId] of [
+      [captured, "captured-session"],
+      [replacement, "replacement-session"],
+    ] as const) {
+      await replaceSessionEntry({ ...scope, sessionKey: baseKey }, { sessionId, updatedAt: 1 });
+      await replaceSessionEntry(
+        { ...scope, sessionKey: runKey },
+        {
+          sessionId,
+          updatedAt: 1,
+          cronRunContinuation: {
+            lifecycleRevision: "original",
+            phase: "ready",
+            basePersisted: true,
           },
-          { env },
-        );
-        expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
-        expect(target.deliveryContext).toEqual(route);
-      },
-      { native: true },
+        },
+      );
+    }
+    const cfg = { agents: { entries: { main: {} } } };
+    setRuntimeConfigSnapshot({ ...cfg, session: { store: captured.storePath } });
+    const target = await captureSessionEventTargetForHost("main", runKey, {
+      env: captured.env,
+    });
+    setRuntimeConfigSnapshot({ ...cfg, session: { store: replacement.storePath } });
+    const receipt = enqueueSessionEventForHost("Process completed", {
+      agentId: "main",
+      sessionKey: runKey,
+      source: "exec",
+      expectedTarget: target,
+    });
+    receipt.cancel();
+    expect(await withinTest(receipt.settled, signal)).toMatchObject({ status: "cancelled" });
+    await withinTest(joinContinuations(), signal);
+    expect(loadSessionEntry({ ...captured, sessionKey: runKey })).toBeUndefined();
+    expect(loadSessionEntry({ ...captured, sessionKey: baseKey })?.sessionId).toBe(
+      "captured-session",
+    );
+    expect(loadSessionEntry({ ...replacement, sessionKey: runKey })?.sessionId).toBe(
+      "replacement-session",
     );
   });
 
-  it("preserves cold event capture across an empty usage refresh", async () => {
+  it("rejects deleted-agent events without native journal reads", async ({
+    nativeState: state,
+  }) => {
+    const { env, storePath } = state;
+    const observed = observeHostDataSql();
+    const target = await captureSessionEventTargetForHost("main", sessionKey, { env }).finally(
+      observed.restore,
+    );
+    expect(observed.queries.filter((sql) => /\bagent_deletion_journal\b/i.test(sql))).toEqual([]);
+    expect(target).toMatchObject({
+      agentId: "main",
+      sessionKey,
+      sessionId: "original-session",
+      lifecycleRevision: "original-revision",
+      storePath,
+      deliveryContext: route,
+      settings: { permissionMode: "full" },
+    });
+    expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
+    await withAgentDeletion(
+      "main",
+      async (begin) => {
+        const deletion = await begin({
+          agentId: "main",
+          agentDir: state.agentDir("main"),
+          workspaceDir: state.path("workspace"),
+          sessionsDir: state.sessionsDir("main"),
+          phase: "draining",
+        });
+        expect(() => assertSessionEventTargetCurrent(target)).toThrow(
+          "Session event owner is being deleted",
+        );
+        for (const expectedTarget of [target, undefined]) {
+          const receipt = enqueueCompletion(expectedTarget);
+          await expectStopped(receipt, "failed", "Session event agent is being deleted");
+        }
+        expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+        await deletion.rollback();
+      },
+      { env },
+    );
+    expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
+    expect(target.deliveryContext).toEqual(route);
+  });
+
+  it("captures cold events across an empty usage refresh", async () => {
     const { refreshCostUsageCacheForAgent } =
       await import("../../infra/session-cost-usage-aggregation.js");
     await withTargetFixture(
@@ -333,143 +337,133 @@ describe("session event target custody", () => {
     );
   });
 
-  it("retains fresh event custody from a captured Windows short-path spelling", async () => {
-    await withTargetFixture(
-      async (state) => {
-        const root = await fs.realpath(state.path());
-        const directory = path.join(root, "EVENT~1");
-        const canonicalDirectory = path.join(root, "event-store");
-        await fs.mkdir(canonicalDirectory);
-        await fs.symlink(canonicalDirectory, directory, "junction");
-        const storePath = path.join(directory, "event-store.sqlite");
-        setRuntimeConfigSnapshot({
-          agents: { entries: { main: {} } },
-          session: { store: storePath },
-        });
-        openOpenClawAgentDatabase({ agentId: "main", path: storePath, env: state.env });
-        const originalLstat = fsSync.lstatSync;
-        const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
-        // Windows short directory aliases aren't symlinks; the fixture shares real DB/WAL files.
-        const lstat = vi
-          .spyOn(fsSync, "lstatSync")
-          .mockImplementation((pathname, options) =>
-            originalLstat(String(pathname) === directory ? canonicalDirectory : pathname, options),
-          );
-        const reader = interceptReadOwner((owner) => ({
-          ...owner,
-          // Transfer the historical spelling but preserve native facts and guards.
-          selectedStore: owner.selectedStore && { ...owner.selectedStore, physicalPath: storePath },
-        }));
-        let prepared: Awaited<ReturnType<typeof prepareSessionEventTargetForHost>> | undefined;
-        try {
-          const target = await captureSessionEventTargetForHost("main", sessionKey, {
-            env: state.env,
-          });
-          reader.mockRestore();
-          prepared = await prepareSessionEventTargetForHost(target, { createIfMissing: true });
-          prepared.assertCurrent();
-          const scope = { agentId: "main", storePath, sessionKey, env: state.env };
-          const snapshot = await loadReplySessionInitializationSnapshot(scope);
-          const committed = await commitReplySessionInitialization({
-            ...scope,
-            activeSessionKey: sessionKey,
-            expectedRevision: snapshot.revision,
-            sessionEntry: {
-              sessionId: "windows-first-session",
-              lifecycleRevision: "first",
-              updatedAt: 1,
-            },
-            bindCreation: prepared.bindCreation,
-          });
-          expect(committed.ok).toBe(true);
-          expect(target).toMatchObject({
-            sessionId: "windows-first-session",
-            lifecycleRevision: "first",
-          });
-          prepared.assertCurrent();
-        } finally {
-          prepared?.release();
-          reader.mockRestore();
-          lstat.mockRestore();
-          platform.mockRestore();
-        }
-      },
-      { empty: true, native: true },
-    );
+  it("preserves custody through Windows short-path spelling", async ({ coldState: state }) => {
+    const root = await fs.realpath(state.path());
+    const directory = path.join(root, "EVENT~1");
+    const canonicalDirectory = path.join(root, "event-store");
+    await fs.mkdir(canonicalDirectory);
+    await fs.symlink(canonicalDirectory, directory, "junction");
+    const storePath = path.join(directory, "event-store.sqlite");
+    setRuntimeConfigSnapshot({
+      agents: { entries: { main: {} } },
+      session: { store: storePath },
+    });
+    openOpenClawAgentDatabase({ agentId: "main", path: storePath, env: state.env });
+    const originalLstat = fsSync.lstatSync;
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    // Windows short directory aliases aren't symlinks; the fixture shares real DB/WAL files.
+    const lstat = vi
+      .spyOn(fsSync, "lstatSync")
+      .mockImplementation((pathname, options) =>
+        originalLstat(String(pathname) === directory ? canonicalDirectory : pathname, options),
+      );
+    const reader = interceptReadOwner((owner) => ({
+      ...owner,
+      // Transfer the historical spelling but preserve native facts and guards.
+      selectedStore: owner.selectedStore && { ...owner.selectedStore, physicalPath: storePath },
+    }));
+    let prepared: Awaited<ReturnType<typeof prepareSessionEventTargetForHost>> | undefined;
+    try {
+      const target = await captureSessionEventTargetForHost("main", sessionKey, {
+        env: state.env,
+      });
+      reader.mockRestore();
+      prepared = await prepareSessionEventTargetForHost(target, { createIfMissing: true });
+      prepared.assertCurrent();
+      const scope = { agentId: "main", storePath, sessionKey, env: state.env };
+      const snapshot = await loadReplySessionInitializationSnapshot(scope);
+      const committed = await commitReplySessionInitialization({
+        ...scope,
+        activeSessionKey: sessionKey,
+        expectedRevision: snapshot.revision,
+        sessionEntry: {
+          sessionId: "windows-first-session",
+          lifecycleRevision: "first",
+          updatedAt: 1,
+        },
+        bindCreation: prepared.bindCreation,
+      });
+      expect(committed.ok).toBe(true);
+      expect(target).toMatchObject({
+        sessionId: "windows-first-session",
+        lifecycleRevision: "first",
+      });
+      prepared.assertCurrent();
+    } finally {
+      prepared?.release();
+      reader.mockRestore();
+      lstat.mockRestore();
+      platform.mockRestore();
+    }
   });
 
   it.for([false, true])(
-    "joins cold native preparation before settling cancellation (retained occurrence: %s)",
-    async (preserve, { signal }) => {
-      await withTargetFixture(
-        async ({ env }) => {
-          const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
-          const prepared = createDeferred();
-          const release = createDeferred();
-          const cancellation = new AbortController();
-          const prepareDatabase = sessionReplacement.prepareSessionEntryReplacementDatabase;
-          const preparation = vi
-            .spyOn(sessionReplacement, "prepareSessionEntryReplacementDatabase")
-            .mockImplementation(async (...args) => {
-              await prepareDatabase(...args);
-              prepared.resolve();
-              cancellation.abort();
-              await release.promise;
-            });
-          const occurrence = preserve
-            ? enqueueRequiredSystemEventEntry("Cancelled fresh ingress", { sessionKey })
-            : undefined;
-          const receipt = enqueueSessionEventForHost("Cancelled fresh ingress", {
-            ...eventScope,
-            source: "plugin",
-            expectedTarget: target,
-            createIfMissing: true,
-            abortSignal: cancellation.signal,
-            ...(occurrence
-              ? { occurrences: [occurrence], preserveOccurrenceOnRejection: true as const }
-              : {}),
-          });
-          let accepted = false;
-          let settled = false;
-          void receipt.accepted.then(() => {
-            accepted = true;
-          });
-          void receipt.settled.then(() => {
-            settled = true;
-          });
-          try {
-            await withinTest(
-              awaitGateBeforeSettlement(
-                prepared.promise,
-                receipt.settled,
-                "event never prepared native storage",
-              ),
-              signal,
-            );
-            await Promise.resolve();
-            expect({ accepted, settled }).toEqual({ accepted: false, settled: false });
-            if (occurrence) {
-              expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(true);
-            }
-          } finally {
-            release.resolve();
-            preparation.mockRestore();
-            await receipt.settled;
-          }
-          await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
-          await expectStopped(receipt, "cancelled");
-          if (occurrence) {
-            expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(false);
-            expect(peekSystemEventEntries(sessionKey)).toEqual([occurrence]);
-          }
-        },
-        { empty: true, native: true },
-      );
+    "joins cold preparation before cancellation (retained: %s)",
+    async (preserve, { signal, coldState: { env } }) => {
+      const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
+      const prepared = createDeferred();
+      const release = createDeferred();
+      const cancellation = new AbortController();
+      const prepareDatabase = sessionReplacement.prepareSessionEntryReplacementDatabase;
+      const preparation = vi
+        .spyOn(sessionReplacement, "prepareSessionEntryReplacementDatabase")
+        .mockImplementation(async (...args) => {
+          await prepareDatabase(...args);
+          prepared.resolve();
+          cancellation.abort();
+          await release.promise;
+        });
+      const occurrence = preserve
+        ? enqueueRequiredSystemEventEntry("Cancelled fresh ingress", { sessionKey })
+        : undefined;
+      const receipt = enqueueSessionEventForHost("Cancelled fresh ingress", {
+        ...eventScope,
+        source: "plugin",
+        expectedTarget: target,
+        createIfMissing: true,
+        abortSignal: cancellation.signal,
+        ...(occurrence
+          ? { occurrences: [occurrence], preserveOccurrenceOnRejection: true as const }
+          : {}),
+      });
+      let accepted = false;
+      let settled = false;
+      void receipt.accepted.then(() => {
+        accepted = true;
+      });
+      void receipt.settled.then(() => {
+        settled = true;
+      });
+      try {
+        await withinTest(
+          awaitGateBeforeSettlement(
+            prepared.promise,
+            receipt.settled,
+            "event never prepared native storage",
+          ),
+          signal,
+        );
+        await Promise.resolve();
+        expect({ accepted, settled }).toEqual({ accepted: false, settled: false });
+        if (occurrence) {
+          expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(true);
+        }
+      } finally {
+        release.resolve();
+        preparation.mockRestore();
+        await receipt.settled;
+      }
+      await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
+      await expectStopped(receipt, "cancelled");
+      if (occurrence) {
+        expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(false);
+        expect(peekSystemEventEntries(sessionKey)).toEqual([occurrence]);
+      }
     },
   );
 
   it.each(["fresh", "retained", "revoked", "already-revoked"] as const)(
-    "keeps cold capture read-only and prepares storage only for authorized fresh work: %s",
+    "prepares cold storage only for authorized fresh work: %s",
     async (kind) => {
       await withTargetFixture(
         async ({ env }) => {
@@ -530,236 +524,222 @@ describe("session event target custody", () => {
       );
     },
   );
-  it("captures the original store, route and producer restrictions across asynchronous lookup", async () => {
-    await withTargetFixture(async ({ env, path: fixturePath, storePath }) => {
-      const suppliedEnv = { ...env };
-      const toolsAllow = ["read", "exec"];
-      let invocationActive = true;
-      let producerActive = true;
-      const runId = "event-target-private-producer";
-      registerAgentRunContext(runId, { agentId: "main", sessionKey, sessionEventDelivery: false });
-      const targetPromise = withGatewayToolCallerIdentity(
-        {
-          agentId: "main",
-          sessionKey,
-          sessionEventToolsAllow: toolsAllow,
-          operationalRunInstance: createOperationalRunInstanceRef(runId),
-          receiptAuthority: () => invocationActive,
-        },
+  it("retains store, route and producer limits across lookup", async ({
+    state: { env, path: fixturePath, storePath },
+  }) => {
+    const suppliedEnv = { ...env };
+    const toolsAllow = ["read", "exec"];
+    let invocationActive = true;
+    let producerActive = true;
+    const runId = "event-target-private-producer";
+    registerAgentRunContext(runId, { agentId: "main", sessionKey, sessionEventDelivery: false });
+    const targetPromise = withGatewayToolCallerIdentity(
+      {
+        agentId: "main",
+        sessionKey,
+        sessionEventToolsAllow: toolsAllow,
+        operationalRunInstance: createOperationalRunInstanceRef(runId),
+        receiptAuthority: () => invocationActive,
+      },
+      () =>
+        captureSessionEventTargetForHost("main", sessionKey, {
+          env: suppliedEnv,
+          assertCurrent: () => {
+            if (!producerActive) {
+              throw new Error("Background producer retired");
+            }
+          },
+        }),
+    );
+    clearAgentRunContext(runId);
+    suppliedEnv.OPENCLAW_STATE_DIR = fixturePath("later-state");
+    const target = await targetPromise;
+    toolsAllow.push("message");
+    invocationActive = false;
+
+    expect(target).toMatchObject({
+      ...eventScope,
+      sessionId: "original-session",
+      lifecycleRevision: "original-revision",
+      storePath,
+      deliveryContext: route,
+      deliver: false,
+      settings: { permissionMode: "full" },
+      toolsAllow: ["read", "exec"],
+    });
+    // The independently owned producer outlives its creating tool invocation.
+    expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
+    producerActive = false;
+    expect(() => assertSessionEventTargetCurrent(target)).toThrow("Background producer retired");
+    expect(() => enqueueCompletion(target)).toThrow("Background producer retired");
+    expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+  });
+
+  it.for(["invocation", "producer"] as const)(
+    "rejects %s retirement during capture",
+    async (owner, { state: { env } }) => {
+      let active = true;
+      const capture = withGatewayToolCallerIdentity(
+        { agentId: "main", sessionKey, receiptAuthority: () => owner !== "invocation" || active },
         () =>
           captureSessionEventTargetForHost("main", sessionKey, {
-            env: suppliedEnv,
+            env,
             assertCurrent: () => {
-              if (!producerActive) {
+              if (owner === "producer" && !active) {
                 throw new Error("Background producer retired");
               }
             },
           }),
       );
-      clearAgentRunContext(runId);
-      suppliedEnv.OPENCLAW_STATE_DIR = fixturePath("later-state");
-      const target = await targetPromise;
-      toolsAllow.push("message");
-      invocationActive = false;
-
-      expect(target).toMatchObject({
-        ...eventScope,
-        sessionId: "original-session",
-        lifecycleRevision: "original-revision",
-        storePath,
-        deliveryContext: route,
-        deliver: false,
-        settings: { permissionMode: "full" },
-        toolsAllow: ["read", "exec"],
-      });
-      // The independently owned producer outlives its creating tool invocation.
-      expect(() => assertSessionEventTargetCurrent(target)).not.toThrow();
-      producerActive = false;
-      expect(() => assertSessionEventTargetCurrent(target)).toThrow("Background producer retired");
-      expect(() => enqueueCompletion(target)).toThrow("Background producer retired");
+      active = false;
+      await expect(capture).rejects.toThrow(
+        owner === "invocation" ? "no longer owns its invocation" : "Background producer retired",
+      );
       expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-    });
-  });
-
-  it.each(["invocation", "producer"] as const)(
-    "refuses a target when its %s retires during asynchronous capture",
-    async (owner) => {
-      await withTargetFixture(async ({ env }) => {
-        let active = true;
-        const capture = withGatewayToolCallerIdentity(
-          { agentId: "main", sessionKey, receiptAuthority: () => owner !== "invocation" || active },
-          () =>
-            captureSessionEventTargetForHost("main", sessionKey, {
-              env,
-              assertCurrent: () => {
-                if (owner === "producer" && !active) {
-                  throw new Error("Background producer retired");
-                }
-              },
-            }),
-        );
-        active = false;
-        await expect(capture).rejects.toThrow(
-          owner === "invocation" ? "no longer owns its invocation" : "Background producer retired",
-        );
-        expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-      });
     },
   );
 
-  it.each(["session reset", "lifecycle replacement"] as const)(
-    "rejects a captured target after %s before dispatching a turn",
-    async (change) => {
-      await withTargetFixture(async ({ env, storePath }) => {
-        const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
-        replaceSessionEntrySync(
-          { agentId: "main", storePath, sessionKey, env },
-          {
-            sessionId: change === "session reset" ? "replacement-session" : "original-session",
-            lifecycleRevision: "replacement-revision",
-            updatedAt: 2,
-            delivery: normalizeSessionDeliveryState({
-              context: { ...route, to: "replacement-target" },
-            }),
-          },
-        );
-        const receipt = enqueueCompletion(target);
-
-        await expectStopped(receipt, "failed", "original session generation");
-        expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-      });
-    },
-  );
-
-  it("reports a queued event's policy failure once", async () => {
-    await withTargetFixture(async ({ env }) => {
+  it.for(["session reset", "lifecycle replacement"] as const)(
+    "rejects %s before dispatch",
+    async (change, { state: { env, storePath } }) => {
       const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
-      let current = true;
-      const receipt = enqueueCompletion(target, {
-        assertCurrent: () => {
-          if (!current) {
-            throw new Error("Background producer retired");
-          }
+      replaceSessionEntrySync(
+        { agentId: "main", storePath, sessionKey, env },
+        {
+          sessionId: change === "session reset" ? "replacement-session" : "original-session",
+          lifecycleRevision: "replacement-revision",
+          updatedAt: 2,
+          delivery: normalizeSessionDeliveryState({
+            context: { ...route, to: "replacement-target" },
+          }),
         },
-      });
-      current = false;
+      );
+      const receipt = enqueueCompletion(target);
 
-      await expectStopped(receipt, "failed", "Background producer retired");
-      // Join the independent owner without requiring a producer to consume its receipt.
-      await joinContinuations();
-      expect(receipt.cancel()).toBe(false);
-      resetSystemEventsForTest();
-      expect(eventLogError).toHaveBeenCalledExactlyOnceWith("session event execution failed", {
-        source: "exec",
-        agentId: "main",
-        sessionKey,
-        eventId: receipt.id,
-        error: expect.stringContaining("Background producer retired"),
-      });
+      await expectStopped(receipt, "failed", "original session generation");
       expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+    },
+  );
+
+  it("logs queued-event policy failure once", async ({ state: { env } }) => {
+    const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
+    let current = true;
+    const receipt = enqueueCompletion(target, {
+      assertCurrent: () => {
+        if (!current) {
+          throw new Error("Background producer retired");
+        }
+      },
     });
+    current = false;
+
+    await expectStopped(receipt, "failed", "Background producer retired");
+    // Join the independent owner without requiring a producer to consume its receipt.
+    await joinContinuations();
+    expect(receipt.cancel()).toBe(false);
+    resetSystemEventsForTest();
+    expect(eventLogError).toHaveBeenCalledExactlyOnceWith("session event execution failed", {
+      source: "exec",
+      agentId: "main",
+      sessionKey,
+      eventId: receipt.id,
+      error: expect.stringContaining("Background producer retired"),
+    });
+    expect(peekSystemEventEntries(sessionKey)).toEqual([]);
   });
 
-  it("settles a pending occurrence as cancelled when ephemeral queues close", async () => {
-    await withTargetFixture(async ({ env }) => {
+  it("cancels pending occurrences when queues close", async ({ state: { env } }) => {
+    const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
+    const suspension = gatewayWork.tryBeginGatewaySuspendAdmission(() => {});
+    expect(suspension?.commit()).toBe(true);
+    try {
+      const receipt = enqueueCompletion(target);
+      expect(peekSystemEventEntries(sessionKey).map((event) => event.id)).toEqual([receipt.id]);
+      resetSystemEventsForTest();
+
+      await expectStopped(receipt, "cancelled");
+      await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
+      expect(receipt.cancel()).toBe(false);
+      expect(gatewayWork.getGatewaySuspendAdmissionPhase()).toBe("prepared");
+      expect(peekSystemEventEntries(sessionKey)).toEqual([]);
+      expect(eventLogError).not.toHaveBeenCalled();
+    } finally {
+      suspension?.release();
+    }
+  });
+
+  it.for(["reject", "cancel", "removed"] as const)(
+    "preserves passive occurrences after %s settlement",
+    async (boundary, { state: { env } }) => {
       const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
-      const suspension = gatewayWork.tryBeginGatewaySuspendAdmission(() => {});
-      expect(suspension?.commit()).toBe(true);
-      try {
-        const receipt = enqueueCompletion(target);
-        expect(peekSystemEventEntries(sessionKey).map((event) => event.id)).toEqual([receipt.id]);
-        resetSystemEventsForTest();
-
-        await expectStopped(receipt, "cancelled");
-        await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
-        expect(receipt.cancel()).toBe(false);
-        expect(gatewayWork.getGatewaySuspendAdmissionPhase()).toBe("prepared");
-        expect(peekSystemEventEntries(sessionKey)).toEqual([]);
-        expect(eventLogError).not.toHaveBeenCalled();
-      } finally {
-        suspension?.release();
+      const occurrence = enqueueRequiredSystemEventEntry("Deferred hook", { sessionKey });
+      expect(occurrence).not.toBeNull();
+      if (!occurrence) {
+        throw new Error("Expected deferred hook occurrence");
       }
-    });
-  });
-
-  it.each(["reject", "cancel", "removed"] as const)(
-    "preserves a preexisting passive occurrence only after pre-adoption settlement: %s",
-    async (boundary) => {
-      await withTargetFixture(async ({ env }) => {
-        const target = await captureSessionEventTargetForHost("main", sessionKey, { env });
-        const occurrence = enqueueRequiredSystemEventEntry("Deferred hook", { sessionKey });
-        expect(occurrence).not.toBeNull();
-        if (!occurrence) {
-          throw new Error("Expected deferred hook occurrence");
-        }
-        if (boundary === "reject") {
-          gatewayWork.markGatewayRestartDraining();
-        }
-        const receipt = enqueueSessionEventForHost(occurrence.text, {
-          ...eventScope,
-          source: "hook",
-          expectedTarget: target,
-          occurrences: [occurrence],
-          preserveOccurrenceOnRejection: true,
-        });
-        if (boundary === "cancel") {
-          expect(receipt.cancel()).toBe(true);
-        } else if (boundary === "removed") {
-          resetSystemEventsForTest();
-        }
-        await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
-        await expect(receipt.settled).resolves.toMatchObject({
-          status: boundary === "reject" ? "failed" : "cancelled",
-          executionStarted: false,
-        });
-        expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(false);
-        expect(peekSystemEventEntries(sessionKey)).toEqual(
-          boundary === "removed" ? [] : [occurrence],
-        );
+      if (boundary === "reject") {
+        gatewayWork.markGatewayRestartDraining();
+      }
+      const receipt = enqueueSessionEventForHost(occurrence.text, {
+        ...eventScope,
+        source: "hook",
+        expectedTarget: target,
+        occurrences: [occurrence],
+        preserveOccurrenceOnRejection: true,
       });
+      if (boundary === "cancel") {
+        expect(receipt.cancel()).toBe(true);
+      } else if (boundary === "removed") {
+        resetSystemEventsForTest();
+      }
+      await expect(receipt.accepted).resolves.toMatchObject({ ok: false });
+      await expect(receipt.settled).resolves.toMatchObject({
+        status: boundary === "reject" ? "failed" : "cancelled",
+        executionStarted: false,
+      });
+      expect(isSystemEventTurnOwned(sessionKey, occurrence)).toBe(false);
+      expect(peekSystemEventEntries(sessionKey)).toEqual(
+        boundary === "removed" ? [] : [occurrence],
+      );
     },
   );
 });
 
-it("retains only one captured requester and releases it when cancelled before admission", async ({
-  signal,
-}) => {
-  await withTargetFixture(async ({ env }) => {
-    const release = vi.fn();
-    const retain = vi.fn(() => release);
-    const guest = createAdmittedRunOperatorAuthority({
-      profileId: "guest",
-      scopes: ["operator.write"],
-      assertCurrent() {},
-      retain,
-    });
-    const admin = createAdmittedRunOperatorAuthority({
-      profileId: "admin",
-      scopes: ["operator.admin"],
-      assertCurrent() {},
-    });
-    const target = await captureSessionEventTargetForHost("main", sessionKey, {
-      env,
-      operatorAuthority: guest,
-    });
-    const other = await captureSessionEventTargetForHost("main", sessionKey, {
-      env,
-      operatorAuthority: admin,
-    });
-    expect(() => combineSessionEventTargetsForHost([target, other])).toThrow(
-      "different captured destinations",
-    );
-    const receipt = enqueueSessionEventForHost("Command completed", {
-      ...eventScope,
-      source: "exec",
-      expectedTarget: target,
-    });
-    expect(receipt.cancel()).toBe(true);
-    await expect(withinTest(receipt.settled, signal)).resolves.toMatchObject({
-      status: "cancelled",
-      executionStarted: false,
-    });
-    expect(retain).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
+it("retains one requester until pre-admission cancellation", async ({ signal, state: { env } }) => {
+  const release = vi.fn();
+  const retain = vi.fn(() => release);
+  const guest = createAdmittedRunOperatorAuthority({
+    profileId: "guest",
+    scopes: ["operator.write"],
+    assertCurrent() {},
+    retain,
   });
+  const admin = createAdmittedRunOperatorAuthority({
+    profileId: "admin",
+    scopes: ["operator.admin"],
+    assertCurrent() {},
+  });
+  const target = await captureSessionEventTargetForHost("main", sessionKey, {
+    env,
+    operatorAuthority: guest,
+  });
+  const other = await captureSessionEventTargetForHost("main", sessionKey, {
+    env,
+    operatorAuthority: admin,
+  });
+  expect(() => combineSessionEventTargetsForHost([target, other])).toThrow(
+    "different captured destinations",
+  );
+  const receipt = enqueueSessionEventForHost("Command completed", {
+    ...eventScope,
+    source: "exec",
+    expectedTarget: target,
+  });
+  expect(receipt.cancel()).toBe(true);
+  await expect(withinTest(receipt.settled, signal)).resolves.toMatchObject({
+    status: "cancelled",
+    executionStarted: false,
+  });
+  expect(retain).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledOnce();
 });

@@ -1,9 +1,16 @@
+// Tests session reset prompt generation and transcript-preserving restart hints.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { makeTempWorkspace } from "../../test-helpers/workspace.js";
 import { resolveBareSessionResetPromptState } from "./session-reset-prompt.js";
+
+type ResetPromptParams = Parameters<typeof resolveBareSessionResetPromptState>[0];
+
+async function resolveResetPrompt(params: ResetPromptParams = {}): Promise<string> {
+  return (await resolveBareSessionResetPromptState(params)).prompt;
+}
 
 async function makeBootstrapPendingWorkspace(): Promise<string> {
   const workspaceDir = await makeTempWorkspace("openclaw-reset-bootstrap-");
@@ -13,7 +20,7 @@ async function makeBootstrapPendingWorkspace(): Promise<string> {
 
 describe("resolveBareSessionResetPromptState", () => {
   it("includes the explicit Session Startup instruction for bare /new and /reset", async () => {
-    const { prompt } = await resolveBareSessionResetPromptState({});
+    const prompt = await resolveResetPrompt();
     expect(prompt).toContain("Execute your Session Startup sequence now");
     expect(prompt).toContain("read the required files before responding to the user");
     expect(prompt).toContain("If BOOTSTRAP.md exists in the provided Project Context");
@@ -71,20 +78,16 @@ describe("resolveBareSessionResetPromptState", () => {
     const workspaceDir = await makeBootstrapPendingWorkspace();
 
     const pending = await resolveBareSessionResetPromptState({ workspaceDir });
-    expect(pending).toMatchObject({
-      bootstrapMode: "full",
-      shouldPrependStartupContext: false,
-      prompt: expect.stringContaining("while bootstrap is still pending for this workspace"),
-    });
+    expect(pending.bootstrapMode).toBe("full");
+    expect(pending.shouldPrependStartupContext).toBe(false);
+    expect(pending.prompt).toContain("while bootstrap is still pending for this workspace");
 
     await fs.unlink(path.join(workspaceDir, "BOOTSTRAP.md"));
 
     const complete = await resolveBareSessionResetPromptState({ workspaceDir });
-    expect(complete).toMatchObject({
-      bootstrapMode: "none",
-      shouldPrependStartupContext: true,
-      prompt: expect.stringContaining("Execute your Session Startup sequence now"),
-    });
+    expect(complete.bootstrapMode).toBe("none");
+    expect(complete.shouldPrependStartupContext).toBe(true);
+    expect(complete.prompt).toContain("Execute your Session Startup sequence now");
   });
 
   it("does not resolve bootstrap file access when bootstrap is complete", async () => {
@@ -127,7 +130,9 @@ describe("resolveBareSessionResetPromptState", () => {
       workspaceDir,
       hasBootstrapFileAccess,
     });
+
     expect(hasBootstrapFileAccess).toHaveBeenCalledTimes(1);
-    expect(pending).toMatchObject({ bootstrapMode: "limited", shouldPrependStartupContext: false });
+    expect(pending.bootstrapMode).toBe("limited");
+    expect(pending.shouldPrependStartupContext).toBe(false);
   });
 });

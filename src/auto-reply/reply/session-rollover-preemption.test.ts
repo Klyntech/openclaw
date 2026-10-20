@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterAll, afterEach, expect, it, vi } from "vitest";
@@ -84,12 +85,8 @@ it("preempts a running turn and cancels two queued follow-ups before /new resets
     { sessionKey, sessionId, target },
     async (_operation, signal) => {
       runStarted.resolve();
-      await new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => {
-          runInterrupted = true;
-          resolve();
-        });
-      });
+      await once(signal, "abort");
+      runInterrupted = true;
     },
   );
   await runStarted.promise;
@@ -125,8 +122,7 @@ it("preempts a running turn and cancels two queued follow-ups before /new resets
     expect(await fs.stat(transcriptPath).catch(() => null)).not.toBeNull();
   } finally {
     clearSessionQueues([sessionKey, sessionId]);
-    await initialization.catch(() => {});
-    await activeRun.catch(() => {});
+    await Promise.allSettled([initialization, activeRun]);
   }
 });
 
