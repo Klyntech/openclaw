@@ -85,23 +85,23 @@ beforeEach(async () => {
   transcriptReads.stats.mockImplementation(realTranscriptStatsReader);
 });
 
-async function seedCompactionSession(params: {
-  sessionId: string;
-  storePath: string;
-  nativeHarness?: boolean;
-  withTranscript?: boolean;
-}) {
+async function seedCompactionSession(
+  sessionId: string,
+  nativeHarness = false,
+  withTranscript = true,
+) {
+  const { storePath } = await createSessionStoreDir();
   const scope = {
     agentId: "main",
-    sessionId: params.sessionId,
+    sessionId,
     sessionKey: "agent:main:main",
-    storePath: params.storePath,
+    storePath,
   };
   await upsertSessionEntryCore(
     scope,
     sessionStoreEntry(
-      params.sessionId,
-      params.nativeHarness
+      sessionId,
+      nativeHarness
         ? {
             agentHarnessId: "codex",
             cliSessionBindings: { "codex-cli": { sessionId: "thread-1" } },
@@ -111,13 +111,13 @@ async function seedCompactionSession(params: {
         : {},
     ),
   );
-  if (params.withTranscript === false) {
+  if (!withTranscript) {
     return scope;
   }
   await appendTranscriptEvent(scope, {
     type: "session",
     version: 3,
-    id: params.sessionId,
+    id: sessionId,
     timestamp: "2026-08-18T12:00:00.000Z",
     cwd: "/tmp",
   });
@@ -156,27 +156,13 @@ function failTranscriptReadForSession(sessionId: string, reader: "hydration" | "
   }
 }
 
-test.each([
-  { stage: "legacy preflight", sessionId: "sess-read-failure", reader: "hydration" as const },
-  {
-    stage: "native preflight",
-    sessionId: "sess-native-read-failure",
-    reader: "stats" as const,
-    nativeHarness: true,
-  },
-  {
-    stage: "maxLines preflight",
-    sessionId: "sess-max-lines-read-failure",
-    reader: "stats" as const,
-    maxLines: 50,
-  },
-])(
-  "sessions.compact reports $stage transcript read failures as unavailable",
-  async ({ sessionId, maxLines, nativeHarness, reader }) => {
-    const { storePath } = await createSessionStoreDir();
-    await seedCompactionSession({ sessionId, storePath, nativeHarness });
-    failTranscriptReadForSession(sessionId, reader);
-
+test.each(["legacy", "native", "maxLines"])(
+  "sessions.compact reports %s preflight transcript read failures as unavailable",
+  async (stage) => {
+    const sessionId = `sess-${stage}-read-failure`;
+    const maxLines = stage === "maxLines" ? 50 : undefined;
+    await seedCompactionSession(sessionId, stage === "native");
+    failTranscriptReadForSession(sessionId, stage === "legacy" ? "hydration" : "stats");
     expect(await compact("main", maxLines)).toMatchObject({
       ok: false,
       error: {
@@ -190,13 +176,7 @@ test.each([
 test.each([false, true])(
   "sessions.compact keeps an empty transcript as a successful no-op (native harness: %s)",
   async (nativeHarness) => {
-    const { storePath } = await createSessionStoreDir();
-    await seedCompactionSession({
-      sessionId: "sess-empty-model",
-      storePath,
-      withTranscript: false,
-      nativeHarness,
-    });
+    await seedCompactionSession("sess-empty-model", nativeHarness, false);
 
     expect(await compact()).toMatchObject({
       ok: true,
@@ -226,13 +206,7 @@ test.each([undefined, 2])(
 test.each([false, true])(
   "sessions.compact reads settled facts (native harness: %s)",
   async (nativeHarness) => {
-    const { storePath } = await createSessionStoreDir();
-    const scope = await seedCompactionSession({
-      sessionId: "sess-compact-settled",
-      storePath,
-      nativeHarness,
-      withTranscript: false,
-    });
+    const scope = await seedCompactionSession("sess-compact-settled", nativeHarness, false);
     const settle = settlementOwner.waitForTerminalSessionRunSettlement;
     const settlement = vi
       .spyOn(settlementOwner, "waitForTerminalSessionRunSettlement")

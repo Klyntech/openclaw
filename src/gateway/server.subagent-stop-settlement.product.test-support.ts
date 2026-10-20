@@ -1,14 +1,11 @@
-// Natural Gateway parent, production spawn, and admin HTTP Stop support.
 import { X509Certificate } from "node:crypto";
 import { request } from "node:https";
+import { json } from "node:stream/consumers";
 import { expectDefined } from "@openclaw/normalization-core";
 import type { Mock } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { TEST_TLS_CERT_PEM, TEST_TLS_KEY_PEM } from "../../test/helpers/tls-fixture.js";
-import {
-  resolvePreparedRunAdmission,
-  type AdmittedRunContext,
-} from "../agents/admitted-run-context.js";
+import { resolvePreparedRunAdmission } from "../agents/admitted-run-context.js";
 import type {
   EmbeddedAgentRunResult,
   runEmbeddedAgent as runEmbeddedAgentType,
@@ -41,7 +38,6 @@ export const subagentStopProxyHeaders = {
   "x-forwarded-user": proxyUser,
 };
 
-/** Builds the isolated HTTPS Gateway configuration shared by public subagent Stop proofs. */
 export function buildSubagentStopConfig(
   workspace: string,
   tls: { certPath: string; keyPath: string },
@@ -112,17 +108,13 @@ export function buildSubagentStopConfig(
   };
 }
 
-async function resolveAdmission(params: EmbeddedRunParams): Promise<AdmittedRunContext> {
-  return await resolvePreparedRunAdmission({
+async function spawnChild(params: EmbeddedRunParams) {
+  const admitted = await resolvePreparedRunAdmission({
     runId: params.runId,
     runtimeKind: "embedded",
     admittedRunContext: params.admittedRunContext,
     preparedRunAdmission: params.preparedRunAdmission,
   });
-}
-
-async function spawnChild(params: EmbeddedRunParams) {
-  const admitted = await resolveAdmission(params);
   const sessionKey = expectDefined(params.sessionKey, "admitted parent session key");
   const agentId = expectDefined(params.agentId, "admitted parent agent id");
   const config = expectDefined(params.config, "admitted parent config");
@@ -153,7 +145,6 @@ async function spawnChild(params: EmbeddedRunParams) {
   return result.details as SpawnReceipt;
 }
 
-/** Sends the administrator HTTPS request used by the public subagent Stop endpoint. */
 export function postSubagentKill(port: number, sessionKey: string) {
   return new Promise<KillResponse>((resolve, reject) => {
     const outgoing = request(
@@ -169,13 +160,10 @@ export function postSubagentKill(port: number, sessionKey: string) {
         },
       },
       (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.once("error", reject);
-        response.once("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          resolve({ status: response.statusCode ?? 0, body: JSON.parse(text) as unknown });
-        });
+        void json(response).then(
+          (body: unknown) => resolve({ status: response.statusCode ?? 0, body }),
+          reject,
+        );
       },
     );
     outgoing.once("error", reject);
