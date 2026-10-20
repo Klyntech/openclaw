@@ -17,6 +17,7 @@ function readBuiltIdentity(html: string): { buildId: string } {
   return JSON.parse(encoded);
 }
 
+const uiPath = (file: string) => fileURLToPath(new URL(`../${file}`, import.meta.url));
 let root: string;
 let outDir: string;
 const info = vi.fn<(message: string) => void>();
@@ -31,8 +32,7 @@ function setOutput(
 ) {
   config.build = { ...config.build, rolldownOptions: { ...config.build?.rolldownOptions, output } };
 }
-async function offlineAssets() {
-  const worker = await readOutput("sw.js");
+function offlineAssets(worker: string) {
   const boot: { assets: Array<{ path: string }> } = JSON.parse(
     /const OFFLINE_BOOT = (.+);/u.exec(worker)![1]!,
   );
@@ -59,17 +59,11 @@ function addModules(
       name: "build-fixture",
       enforce: "pre",
       resolveId(id, importer) {
-        if (!aliases) {
-          return modules.has(id) ? id : null;
-        }
-        if (aliases[id]) {
-          return aliases[id];
-        }
-        if (importer && id.startsWith(".")) {
-          const resolved = path.resolve(path.dirname(importer), id);
-          return modules.has(resolved) ? resolved : null;
-        }
-        return null;
+        const resolved = !aliases
+          ? id
+          : (aliases[id] ??
+            (importer && id.startsWith(".") ? path.resolve(path.dirname(importer), id) : null));
+        return resolved && modules.has(resolved) ? resolved : null;
       },
       load: (id) => modules.get(id) ?? null,
     },
@@ -81,7 +75,12 @@ async function buildOutput(config: InlineConfig) {
   if (Array.isArray(built) || !("output" in built)) {
     throw new Error("Expected one production bundle");
   }
-  return built;
+  return {
+    output: built.output,
+    names: await assetNames(),
+    html: await readOutput("index.html"),
+    worker: await readOutput("sw.js"),
+  };
 }
 
 function createConfig(level: "info" | "silent" = "silent"): InlineConfig {
@@ -137,8 +136,7 @@ it("omits already imported JavaScript from lazy preload tables, retaining lazy J
       })),
     },
   });
-  await build(config);
-  const names = await assetNames();
+  const { names, html } = await buildOutput(config);
   const entryName = names.find((name) => /^index-.*\.js$/u.test(name))!;
   const entry = await readAsset(entryName);
   const table = /^const __vite__mapDeps=.*$/mu.exec(entry)?.[0];
@@ -149,7 +147,7 @@ it("omits already imported JavaScript from lazy preload tables, retaining lazy J
   expect(table).not.toContain(sharedName);
   expect(table).toContain(lazyName);
   expect(table).toMatch(/lazy-[^"/]+\.css/u);
-  expect(await readOutput("index.html")).toContain(sharedName);
+  expect(html).toContain(sharedName);
 });
 
 it("keeps page styles separate from measured JavaScript boot groups", async () => {
@@ -196,13 +194,12 @@ it("keeps page styles separate from measured JavaScript boot groups", async () =
   const built = await buildOutput(config);
   const lazyChunk = built.output.find((chunk) => chunk.type === "chunk" && lazy in chunk.modules);
   expect(lazyChunk?.type === "chunk" && lazyCss in lazyChunk.modules).toBe(true);
-  const names = await assetNames();
+  const { names, html } = built;
   const styles = await readAssets(names, ".css");
   const initial = styles.find(({ source }) => source.includes(".initial-page"))!;
   const firstStyle = styles.find(({ source }) => source.includes(".first-page"))!;
   const secondStyle = styles.find(({ source }) => source.includes(".second-page"))!;
   expect(new Set([initial.name, firstStyle.name, secondStyle.name]).size).toBe(3);
-  const html = await readOutput("index.html");
   expect(html).toContain(initial.name);
   expect(html).not.toContain(firstStyle.name);
   expect(html).not.toContain(secondStyle.name);
@@ -211,60 +208,49 @@ it("keeps page styles separate from measured JavaScript boot groups", async () =
   expect(scripts).toContain(secondStyle.name);
 });
 
-it("prepares the sign-in gate offline without preloading it into ordinary chat navigation", async () => {
-  const config = createConfig();
-  const gate = fileURLToPath(new URL("../components/login-gate.ts", import.meta.url));
-  const feedback = fileURLToPath(
-    new URL("../components/login-offline-fixture.ts", import.meta.url),
-  );
-  const modules = new Map([
-    [gate, `import { message } from ${JSON.stringify(feedback)}; export const label = message;`],
-    [feedback, 'export const message = "Connect again when online";'],
-  ]);
-  await writeRoot("main.js", `globalThis.loadLogin = () => import(${JSON.stringify(gate)});`);
-  addModules(config, modules);
-  const built = await buildOutput(config);
-  const gateChunk = built.output.find(
-    (entry) => entry.type === "chunk" && entry.facadeModuleId === gate,
-  );
-  if (!gateChunk || gateChunk.type !== "chunk") {
-    throw new Error("Expected the dynamically imported sign-in gate");
-  }
-  expect(await offlineAssets()).toEqual(
-    expect.arrayContaining([gateChunk.fileName, ...gateChunk.imports]),
-  );
-  const html = await readOutput("index.html");
-  expect(html).not.toContain(gateChunk.fileName);
-});
-
-it("caches attachment workers offline without preloading them as document modules", async () => {
-  const config = createConfig();
-  const sidebar = fileURLToPath(new URL("../components/app-sidebar.tsx", import.meta.url));
-  const worker = path.join(root, "resize.js");
-  await fs.writeFile(worker, 'self.onmessage = () => self.postMessage("resized");');
-  await writeRoot("main.js", `globalThis.loadSidebar = () => import(${JSON.stringify(sidebar)});`);
-  addModules(
-    config,
-    new Map([
-      [
-        sidebar,
-        `import url from ${JSON.stringify(`${worker}?worker&url`)}; export const resize = () => new Worker(url);`,
-      ],
-    ]),
-  );
-  const built = await buildOutput(config);
-  const sidebarChunk = built.output.find(
-    (entry) => entry.type === "chunk" && entry.facadeModuleId === sidebar,
-  );
-  expect(sidebarChunk).toBeDefined();
-  const assets = await assetNames();
-  const workerFile = assets.find((name) => /^resize-.*\.js$/u.test(name));
-  expect(workerFile).toBeDefined();
-  expect(await offlineAssets()).toContain(`assets/${workerFile}`);
-  const html = await readOutput("index.html");
-  expect(html).toContain(sidebarChunk!.fileName);
-  expect(html).not.toContain(workerFile);
-});
+it.each(["login", "attachment"] as const)(
+  "prepares %s assets offline without preloading the wrong modules",
+  async (kind) => {
+    const attachment = kind === "attachment";
+    const entry = uiPath(attachment ? "components/app-sidebar.tsx" : "components/login-gate.ts");
+    const dependency = attachment
+      ? path.join(root, "resize.js")
+      : uiPath("components/login-offline-fixture.ts");
+    const modules = new Map<string, string>();
+    if (attachment) {
+      await fs.writeFile(dependency, 'self.onmessage = () => self.postMessage("resized");');
+      modules.set(
+        entry,
+        `import url from ${JSON.stringify(`${dependency}?worker&url`)}; export const resize = () => new Worker(url);`,
+      );
+    } else {
+      modules.set(
+        entry,
+        `import { message } from ${JSON.stringify(dependency)}; export const label = message;`,
+      );
+      modules.set(dependency, 'export const message = "Connect again when online";');
+    }
+    const config = createConfig();
+    await writeRoot("main.js", `globalThis.load = () => import(${JSON.stringify(entry)});`);
+    addModules(config, modules);
+    const built = await buildOutput(config);
+    const chunk = built.output.find(
+      (item) => item.type === "chunk" && item.facadeModuleId === entry,
+    );
+    assert.ok(chunk?.type === "chunk", "Expected the dynamically imported fixture entry");
+    const cached = offlineAssets(built.worker);
+    if (attachment) {
+      const workerFile = built.names.find((name) => /^resize-.*\.js$/u.test(name));
+      expect(workerFile).toBeDefined();
+      expect(cached).toContain(`assets/${workerFile}`);
+      expect(built.html).toContain(chunk.fileName);
+      expect(built.html).not.toContain(workerFile);
+    } else {
+      expect(cached).toEqual(expect.arrayContaining([chunk.fileName, ...chunk.imports]));
+      expect(built.html).not.toContain(chunk.fileName);
+    }
+  },
+);
 
 it.each(["unresolved import", "blocked output"])(
   "preserves the original %s diagnostic without finalizing the build",
@@ -330,11 +316,7 @@ it("reports completed compression work before build completion at a bounded cade
       name: "compression-progress-fixture",
       generateBundle() {
         for (let index = 0; index < 4; index++) {
-          this.emitFile({
-            type: "asset",
-            fileName: `assets/nested/extra-${index}.txt`,
-            source: "fixture",
-          });
+          this.emitFile({ type: "asset", fileName: `assets/x/${index}.txt`, source: "fixture" });
         }
       },
     },
@@ -348,7 +330,7 @@ it("reports completed compression work before build completion at a bounded cade
   });
   const completed = emitted.filter((name) => name.endsWith(".gz")).length;
   expect(completed).toBeGreaterThan(4);
-  expect(activity.map(({ elapsed, assets, sidecars }) => ({ elapsed, assets, sidecars }))).toEqual([
+  expect(activity).toMatchObject([
     ...Array.from({ length: Math.floor(completed / 2) + 1 }, (_, index) => ({
       elapsed: index * 10_000,
       assets: index * 2,
@@ -375,32 +357,26 @@ it.each([
   const configuredOutDir = outDir;
   if (output !== "configured") {
     outDir = path.join(root, "overridden-output");
-    config.build =
-      output === "output override"
-        ? {
-            ...config.build,
-            rolldownOptions: {
-              ...config.build?.rolldownOptions,
-              output: { dir: outDir },
-            },
-          }
-        : {
-            ...config.build,
-            outDir: output === "relative override" ? path.relative(root, outDir) : outDir,
-          };
+    if (output === "output override") {
+      setOutput(config, { dir: outDir });
+    } else {
+      config.build = {
+        ...config.build,
+        outDir: output === "relative override" ? path.relative(root, outDir) : outDir,
+      };
+    }
   }
   config.publicDir = fileURLToPath(new URL("../../public", import.meta.url));
   await writeRoot(
     "index.html",
     '<html><body><script>globalThis.fixtureBooted = true;</script><button>Load</button><script type="module" src="./main.js"></script></body></html>',
   );
-  await build(config);
+  const { names: emitted, html, worker } = await buildOutput(config);
   expect(info).not.toHaveBeenCalled();
   if (output !== "configured") {
     await expect(fs.stat(configuredOutDir)).rejects.toMatchObject({ code: "ENOENT" });
   }
 
-  const emitted = (await assetNames()).toSorted();
   expect(emitted.some((name) => name.endsWith(".map"))).toBe(true);
 
   const scripts = emitted.filter((name) => name.endsWith(".js"));
@@ -419,9 +395,7 @@ it.each([
       );
     }
   }
-  const serviceWorker = await readOutput("sw.js");
-  const embeddedBuildId = /const EMBEDDED_CACHE_VERSION = "([^"]+)"/u.exec(serviceWorker)?.[1];
-  const html = await readOutput("index.html");
+  const embeddedBuildId = /const EMBEDDED_CACHE_VERSION = "([^"]+)"/u.exec(worker)?.[1];
   const buildInfo = readBuiltIdentity(html);
   expect(embeddedBuildId).toBe(buildInfo.buildId);
 
@@ -473,13 +447,11 @@ it("changes the public asset version after a same-commit rebuild without changin
   const cacheIds: string[] = [];
   for (const title of ["First", "Second"]) {
     await fs.writeFile(path.join(publicDir, "favicon.svg"), `<svg><title>${title}</title></svg>`);
-    await build(config);
-    const html = await readOutput("index.html");
+    const { html, worker } = await buildOutput(config);
     initialBuildId ??= readBuiltIdentity(html).buildId;
     const cacheId = /data-openclaw-control-ui-build-id="([^"]+)"/u.exec(html)?.[1];
     expect(cacheId).toBeDefined();
     cacheIds.push(cacheId!);
-    const worker = await readOutput("sw.js");
     expect(/const EMBEDDED_CACHE_VERSION = "([^"]+)"/u.exec(worker)?.[1]).toBe(initialBuildId);
   }
   expect(cacheIds[0]).not.toBe(cacheIds[1]);

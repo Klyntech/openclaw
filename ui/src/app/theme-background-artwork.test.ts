@@ -24,8 +24,7 @@ const branding = (backgrounds?: ThemeArtwork["backgrounds"]) => ({
   ...(backgrounds ? { artwork: { backgrounds } } : {}),
 });
 const darkTheme = branding({ dark: { url: DARK } });
-const sync = (theme = darkTheme, mode: "dark" | "light" = "dark", visibility?: number) =>
-  syncThemeBackgroundArtwork(root, theme, mode, visibility);
+const sync = syncThemeBackgroundArtwork.bind(null, root);
 function checkImage(source?: string, percent = "70") {
   const scrim = `color-mix(in srgb, var(--bg-content, var(--bg)) ${percent}%, transparent)`;
   expect([image(), root.dataset.themeBackground]).toEqual([
@@ -35,7 +34,7 @@ function checkImage(source?: string, percent = "70") {
 }
 const waitImage = (src: string, pct?: string) => vi.waitFor(() => checkImage(src, pct));
 afterEach(() => {
-  sync(branding());
+  sync(branding(), "dark");
   root.removeAttribute("style");
   fetchArtwork.mockReset();
 });
@@ -43,7 +42,7 @@ afterEach(() => {
 it("dims light artwork at 65% of dark-mode strength", async () => {
   fetchArtwork.mockImplementation(async ({ url }) => (url === LIGHT ? "blob:day" : "blob:night"));
   const theme = branding({ dark: { url: DARK }, light: { url: LIGHT } });
-  sync(theme);
+  sync(theme, "dark");
   await waitImage("blob:night");
   sync(theme, "light");
   await waitImage("blob:day", "80.5");
@@ -53,14 +52,12 @@ it("lifts the scrim toward the shared cap without refetching", async () => {
   fetchArtwork.mockResolvedValue("blob:night");
   sync(darkTheme, "dark", 0.25);
   await waitImage("blob:night");
-  for (const [visibility, percent] of [
-    [0.75, "69"],
-    [1, "68"],
-    [undefined, "70"],
-  ] as const) {
-    sync(darkTheme, "dark", visibility);
-    checkImage("blob:night", percent);
-  }
+  sync(darkTheme, "dark", 0.75);
+  checkImage("blob:night", "69");
+  sync(darkTheme, "dark", 1);
+  checkImage("blob:night", "68");
+  sync(darkTheme, "dark");
+  checkImage("blob:night");
   expect(fetchArtwork).toHaveBeenCalledOnce();
 });
 
@@ -69,12 +66,12 @@ it("ignores a slower superseded image", async () => {
   fetchArtwork.mockImplementation(async ({ url }) =>
     url === DARK ? slow.promise : "blob:current",
   );
-  sync();
+  sync(darkTheme, "dark");
   // Serialize mocked dynamic imports; concurrent imports can resolve to the real module in Vitest.
   await vi.waitFor(() =>
     expect(fetchArtwork).toHaveBeenCalledExactlyOnceWith({ url: DARK, background: true }),
   );
-  sync(branding({ dark: { url: OTHER } }));
+  sync(branding({ dark: { url: OTHER } }), "dark");
   await waitImage("blob:current");
   slow.resolve("blob:stale");
   await slow.promise;
@@ -86,12 +83,12 @@ it("ignores a slower superseded image", async () => {
 
 it("keeps neutral artwork after a failed load and retries on the next presentation", async () => {
   fetchArtwork.mockResolvedValueOnce(null).mockResolvedValue("blob:recovered");
-  sync();
+  sync(darkTheme, "dark");
   await vi.waitFor(() => expect(fetchArtwork).toHaveBeenCalledOnce());
   await Promise.resolve();
   checkImage();
   await vi.waitFor(() => {
-    sync();
+    sync(darkTheme, "dark");
     expect(fetchArtwork).toHaveBeenCalledTimes(2);
   });
   await waitImage("blob:recovered");
