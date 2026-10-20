@@ -5,6 +5,7 @@ import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import { createTestChatPane, nativeHistoryMessage } from "./chat-pane-history.test-support.ts";
 import { createGatewayBrowserClientFixture } from "./chat-pane.test-support.ts";
+import { flushDeferredRowPrune } from "./components/chat-transcript.test-support.ts";
 
 const sourceId = "source-message";
 const message = { role: "assistant", content: "Original answer", __openclaw: { id: sourceId } };
@@ -31,32 +32,29 @@ it.each([
   { result: undefined, expected: "pending" },
   { result: { ok: false, unavailableReason: "oversized" }, expected: "oversized" },
   { result: { ok: false, unavailableReason: "not_found" }, expected: "missing" },
-])(
-  "preserves page-carried reply availability across reconnects ($expected)",
-  ({ result, expected }) => {
-    const request = vi.fn();
-    const { pane, state } = fixture(request);
-    state.chatMessages = [
-      {
-        role: "user",
-        content: "Follow-up",
-        __openclaw: { replyToId: sourceId, replyToMessage: result },
-      },
-    ];
-    expect(pane.replyMessageStatus(sourceId)).toBe(expected);
-    expect(pane.readReplyMessage(sourceId)).toBe(result?.message);
-    pane.connectionGeneration += 1;
-    state.connectionEpoch = pane.connectionGeneration;
-    expect(pane.readReplyMessage(sourceId)).toBe(result?.message);
-    expect(state.chatMessages).toHaveLength(1);
-    expect(request).not.toHaveBeenCalled();
-    state.chatMessages = [];
-    expect(pane.readReplyMessage(sourceId)).toBeUndefined();
-  },
-);
+])("keeps reply availability through reconnect ($expected)", ({ result, expected }) => {
+  const request = vi.fn();
+  const { pane, state } = fixture(request);
+  state.chatMessages = [
+    {
+      role: "user",
+      content: "Follow-up",
+      __openclaw: { replyToId: sourceId, replyToMessage: result },
+    },
+  ];
+  expect(pane.replyMessageStatus(sourceId)).toBe(expected);
+  expect(pane.readReplyMessage(sourceId)).toBe(result?.message);
+  pane.connectionGeneration += 1;
+  state.connectionEpoch = pane.connectionGeneration;
+  expect(pane.readReplyMessage(sourceId)).toBe(result?.message);
+  expect(state.chatMessages).toHaveLength(1);
+  expect(request).not.toHaveBeenCalled();
+  state.chatMessages = [];
+  expect(pane.readReplyMessage(sourceId)).toBeUndefined();
+});
 
 it.each([true, false])(
-  "pages backward to a reply or reports exhaustion (found: %s)",
+  "finds paginated replies or reports exhaustion (found: %s)",
   async (found) => {
     const target = {
       ...nativeHistoryMessage(1, "Original answer"),
@@ -105,9 +103,7 @@ it("abandons reply navigation when the pane switches sessions", async () => {
   pane.resetOlderMessagesViewport();
   deferred.resolve(page([]));
   await deferred.promise;
-  await new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
+  await flushDeferredRowPrune();
   expect(pane.currentReplyNavigationId(state.sessionKey)).toBeNull();
   expect(revealMessage).not.toHaveBeenCalled();
   expect(request).toHaveBeenCalledOnce();

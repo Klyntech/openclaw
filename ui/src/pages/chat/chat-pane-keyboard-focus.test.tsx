@@ -20,8 +20,7 @@ function createFocusedPane() {
     client: createGatewayBrowserClientFixture(),
     sessions: createSessionCapabilityFixture(),
   });
-  pane.active = true;
-  pane.presented = true;
+  Object.assign(pane, { active: true, presented: true });
   const composer = document.createElement("div");
   composer.className = "agent-chat__composer-combobox";
   const textarea = composer.appendChild(document.createElement("textarea"));
@@ -53,7 +52,6 @@ it.each([
   ],
   ["transcript", "Home", () => <span>History</span>, true],
   ...nativeControlNavigationCases
-    // Windows covers non-Apple paging, video covers native media, and Home covers Mac edges.
     .filter((testCase) => {
       const [name, key] = testCase;
       const fixture = testCase[4];
@@ -73,6 +71,10 @@ it.each([
   "loads older history only when %s yields navigation",
   async (_name, key, content, loadsHistory, fixture = {}) => {
     vi.useFakeTimers();
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    });
     const request = vi.fn(async () => ({ messages: [], hasMore: false }));
     const { pane, state } = createTestChatPane({
       client: createGatewayBrowserClientFixture({ request }),
@@ -85,31 +87,16 @@ it.each([
       <div onKeyDown={(event) => pane.handleTranscriptHistoryIntent(event)}>{content()}</div>
     ));
     const thread = container.querySelector("div")!;
-    const sentinel = Object.assign(document.createElement("div"), {
-      className: "chat-history-sentinel",
-    });
-    thread.append(sentinel);
-    pane.historySentinel = sentinel;
+    pane.historySentinel = thread.appendChild(document.createElement("div"));
+    pane.historySentinel.className = "chat-history-sentinel";
     vi.spyOn(pane.transcript, "scrollElement", "get").mockReturnValue(thread);
-    const restorePlatform = configureNativeKeyTarget(thread.firstElementChild!, fixture);
-    try {
-      thread.firstElementChild!.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key,
-          shiftKey: fixture.shiftKey,
-          ctrlKey: fixture.ctrlKey,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-      await Promise.resolve();
-      expect(request).toHaveBeenCalledTimes(loadsHistory ? 1 : 0);
-      expect(pane.historyAutoLoadBlocked).toBe(!loadsHistory);
-    } finally {
-      restorePlatform();
-      vi.unstubAllGlobals();
-      vi.useRealTimers();
-    }
+    onTestFinished(configureNativeKeyTarget(thread.firstElementChild!, fixture));
+    thread.firstElementChild!.dispatchEvent(
+      new KeyboardEvent("keydown", { ...fixture, key, bubbles: true, cancelable: true }),
+    );
+    await Promise.resolve();
+    expect(request).toHaveBeenCalledTimes(loadsHistory ? 1 : 0);
+    expect(pane.historyAutoLoadBlocked).toBe(!loadsHistory);
   },
 );
 
@@ -134,13 +121,9 @@ it("distinguishes an open disclosure from an open overlay", () => {
 });
 
 it("does not steal typing focus from a shadow-root confirmation", async () => {
-  const restoreDialogPolyfill = installDialogPolyfill();
+  onTestFinished(installDialogPolyfill());
   const { pane, focus } = createFocusedPane();
-  const container = document.body.appendChild(document.createElement("div"));
-  onTestFinished(() => {
-    container.remove();
-    restoreDialogPolyfill();
-  });
+  const container = bodyElement("div");
   const shadow = container.attachShadow({ mode: "open" });
   const modal = shadow.appendChild(document.createElement("openclaw-modal-dialog"));
   const cancel = modal.appendChild(document.createElement("button"));

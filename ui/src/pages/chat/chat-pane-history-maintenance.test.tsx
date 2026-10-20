@@ -8,7 +8,6 @@ import {
   createGatewayBrowserClientFixture,
   createInitializationContext,
   createRenderTestChatPane,
-  type TestChatPane,
 } from "./chat-pane.test-support.ts";
 import { subscribeTranscriptScroll } from "./components/chat-transcript-scroll-events.ts";
 import {
@@ -41,10 +40,9 @@ it.each(["idle measurement", "end-command measurement", "native end clamp"] as c
     const pane = createRenderTestChatPane();
     // Independent scenarios must not restore the previous case's cached reader.
     pane.paneId = `maintenance-history-${movement}`;
-    pane.initialize(context);
+    const state = pane.initialize(context);
     document.body.append(pane.element);
     await pane.updateComplete;
-    const state = (pane as unknown as TestChatPane).state;
     state.sessionKey = "agent:main:maintenance-history";
     const request = vi.fn(async () => ({
       messages: [1, 2].map((seq) => nativeHistoryMessage(seq)),

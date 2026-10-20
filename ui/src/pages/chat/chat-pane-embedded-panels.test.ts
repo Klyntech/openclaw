@@ -8,7 +8,6 @@ import "./components/chat-detail-panel.tsx";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { SessionWorkspaceGetResult } from "../../api/types.ts";
-import { loadSettings } from "../../app/settings.ts";
 import * as videoPosters from "../../lib/media/video-poster.ts";
 import { PRESENTATION_CHANGED_EVENT } from "../../lib/presentation.ts";
 import { scopedAgentParamsForSession } from "../../lib/sessions/index.ts";
@@ -57,7 +56,6 @@ import {
   threadProps,
 } from "./components/chat-transcript.test-support.ts";
 import "./components/chat-sidebar-region.runtime.tsx";
-import type { SessionDiscussionPanelConfig } from "./components/session-discussion-panel.tsx";
 import {
   closeSlot,
   ensureSidebarConversation,
@@ -100,17 +98,6 @@ function buttonWithText(root: ParentNode, label: string) {
 
 function element<E extends Element = HTMLElement>(root: ParentNode, selector: string): E {
   return expectDefined(root.querySelector<E>(selector), selector);
-}
-
-function diffRequest() {
-  return vi.fn().mockResolvedValue({
-    sessionKey: "agent:main:review",
-    branch: "feature/review",
-    baseRef: "main",
-    additions: 1,
-    deletions: 1,
-    files: [{ path: "example.txt", status: "modified", additions: 1, deletions: 1 }],
-  });
 }
 
 function videoAttachment(
@@ -621,19 +608,15 @@ it("shows a current preview request failure without leaving Review loading", asy
   expect(query('[data-panel-skeleton="files"]')).toBeNull();
 });
 
-it("offers Discussion after the provider reports it available", () => {
-  const { state } = createReviewFixture();
-  const definitions = sidebarPanelDefinitions(
-    sidebarPanelFixtureParams(state, {
-      discussion: {} as SessionDiscussionPanelConfig,
-      discussionAvailable: true,
-    }),
-  );
-  expect(definitions.find(({ slot }) => slot === "discussion")?.available).toBe(true);
-});
-
 it("retains default Review content and collapsed files while switching tabs, focusing Chat, and minimizing", async () => {
-  const request = diffRequest();
+  const request = vi.fn().mockResolvedValue({
+    sessionKey: "agent:main:review",
+    branch: "feature/review",
+    baseRef: "main",
+    additions: 1,
+    deletions: 1,
+    files: [{ path: "example.txt", status: "modified", additions: 1, deletions: 1 }],
+  });
   const mount = document.body.appendChild(createChatSidebarContainer());
   const query: typeof mount.querySelector = mount.querySelector.bind(mount);
   const state = createPageState(
@@ -647,9 +630,7 @@ it("retains default Review content and collapsed files while switching tabs, foc
     connectionEpoch: 1,
     hello: { features: { methods: ["sessions.diff"] } },
     sessionKey: "agent:main:review",
-    sidebarContent: null,
     sidebarLayout: { columns: [] },
-    settings: loadSettings(),
   });
   let presented = true;
   const owner = new EventTarget();
@@ -739,7 +720,7 @@ it("retains default Review content and collapsed files while switching tabs, foc
 });
 
 it("shows why a file could not open instead of falling back to the session diff", async () => {
-  const request = diffRequest();
+  const request = vi.fn();
   const { renderPanels, state, query } = createReviewFixture();
   const message = 'Failed to load docs/chat.md: <img src="missing.png">';
   state.client = createGatewayBrowserClientFixture({

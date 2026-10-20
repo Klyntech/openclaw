@@ -11,9 +11,20 @@ import {
 } from "./chat-pane.test-support.ts";
 import {
   mountChatPaneHeader,
+  openNativeMenu,
   renderPaneHeaderInto,
 } from "./components/chat-pane-header.test-support.ts";
 import { openSlot, promoteSidebarPanel, setSidebarOpen } from "./sidebar-layout.ts";
+
+function layoutControls(container: HTMLElement) {
+  const query = <T extends HTMLElement = HTMLElement>(selector: string) =>
+    container.querySelector<T>(selector)!;
+  const open = async () => {
+    await openNativeMenu(query(".chat-pane__layout-menu"));
+    return query(".oc-menu");
+  };
+  return { query, open, action: (label: string) => query(`[aria-label="${label}"]`) };
+}
 
 it("keeps Layout actions available across plugin panel swaps", async () => {
   const { pane, state } = createTestChatPane({
@@ -50,23 +61,10 @@ it("keeps Layout actions available across plugin panel swaps", async () => {
     );
     flush();
   };
-  const action = (label: string) => container.querySelector<HTMLElement>(`[aria-label="${label}"]`);
-  const open = async () => {
-    const menu = container.querySelector(".chat-pane__layout-menu")!;
-    const panel = menu.querySelector<HTMLElement>(".oc-menu")!;
-    if (!panel.matches(":popover-open")) {
-      menu.querySelector<HTMLButtonElement>(".chat-pane__layout-trigger")!.click();
-    }
-    await waitForSolid(() => expect(panel.matches(":popover-open")).toBe(true));
-    return panel;
-  };
+  const { action, open, query } = layoutControls(container);
   const activate = async (label: string) => {
     const panel = await open();
-    const item = action(label);
-    if (!item) {
-      throw new Error(`Expected Layout action: ${label}`);
-    }
-    item.click();
+    action(label).click();
     await waitForSolid(() => expect(panel.matches(":popover-open")).toBe(false));
   };
 
@@ -79,7 +77,7 @@ it("keeps Layout actions available across plugin panel swaps", async () => {
   expect(state.sidebarLayout.expanded).toBe(true);
   state.connected = false;
   paint();
-  expect(container.querySelector(".chat-panel-swap")).toBeNull();
+  expect(query(".chat-panel-swap")).toBeNull();
   expect(action("Restore split")!.matches(":disabled")).toBe(false);
   await activate("Restore split");
   expect(state.sidebarLayout.expanded).toBe(false);
@@ -91,7 +89,7 @@ it("keeps Layout actions available across plugin panel swaps", async () => {
 
   state.sidebarLayout = setSidebarOpen({ columns: [] }, true);
   paint();
-  expect(container.querySelector(".chat-panel-swap")).toBeNull();
+  expect(query(".chat-panel-swap")).toBeNull();
   expect(container.querySelectorAll(".chat-side-panel-toggle")).toHaveLength(1);
   await activate("Minimize side panel");
   expect(state.sidebarLayout.open).toBe(false);
@@ -102,34 +100,35 @@ it("retains focused Layout controls and an open menu when header props refresh",
   const onSplitRight = vi.fn<(paneId: string) => void>(() => {
     focusAtSplit.push(document.activeElement);
   });
-  const sidebarLayout = () => openSlot({ columns: [] }, "workspace");
+  const layoutProps = () => ({
+    sidebarLayout: openSlot({ columns: [] }, "workspace"),
+    panelDefinitions: sidebarPanelDefinitions(),
+  });
   const mounted = mountChatPaneHeader([], {
     onClosePane: vi.fn(),
     onSplitRight,
-    sidebarLayout: sidebarLayout(),
-    panelDefinitions: sidebarPanelDefinitions(),
+    ...layoutProps(),
     onLayoutChange: vi.fn(),
   });
   onTestFinished(() => mounted.container.remove());
-  const trigger = mounted.container.querySelector<HTMLButtonElement>(".chat-pane__layout-trigger")!;
-  const menu = mounted.container.querySelector<HTMLElement>(".chat-pane__layout-menu")!;
-  const panel = menu.querySelector<HTMLElement>(".oc-menu")!;
-  flush();
-  trigger.click();
-  await waitForSolid(() => expect(panel.matches(":popover-open")).toBe(true));
-  const close = mounted.container.querySelector(".chat-pane__close-pane")!;
-  const split = mounted.container.querySelector<HTMLButtonElement>(".chat-pane__split-right")!;
+  const { query, open } = layoutControls(mounted.container);
+  const selectors = [
+    ".chat-pane__layout-trigger",
+    ".chat-pane__close-pane",
+    ".chat-pane__split-right",
+    ".chat-pane__layout-menu",
+  ];
+  const controls = selectors.map((selector) => query(selector));
+  const trigger = controls[0]!;
+  const split = controls[2]!;
+  const panel = await open();
   trigger.focus();
   mounted.update({
     title: "Updated session title",
-    sidebarLayout: sidebarLayout(),
-    panelDefinitions: sidebarPanelDefinitions(),
+    ...layoutProps(),
   });
-  expect(mounted.container.querySelector(".chat-pane__layout-trigger")).toBe(trigger);
-  expect(mounted.container.querySelector(".chat-pane__close-pane")).toBe(close);
-  expect(mounted.container.querySelector(".chat-pane__split-right")).toBe(split);
+  selectors.forEach((selector, index) => expect(query(selector)).toBe(controls[index]));
   expect(document.activeElement).toBe(trigger);
-  expect(mounted.container.querySelector(".chat-pane__layout-menu")).toBe(menu);
   expect(panel.matches(":popover-open")).toBe(true);
   split.focus();
   split.click();
@@ -154,12 +153,9 @@ it("keeps a native external panel link when it is the only Layout action", async
     label: "Open panel",
   };
   const mounted = mountChatPaneHeader([], { sidebarLayout: { columns: [] }, panelDefinitions });
-  const trigger = mounted.container.querySelector<HTMLButtonElement>(".chat-pane__layout-trigger")!;
-  trigger.click();
-  await waitForSolid(() =>
-    expect(mounted.container.querySelector('a[aria-label="Open panel"]')).not.toBeNull(),
-  );
-  const link = mounted.container.querySelector<HTMLAnchorElement>('a[aria-label="Open panel"]')!;
+  const { action, open } = layoutControls(mounted.container);
+  await open();
+  const link = action("Open panel");
   expect(link).toMatchObject({
     href: "https://example.test/panel",
     target: "_blank",

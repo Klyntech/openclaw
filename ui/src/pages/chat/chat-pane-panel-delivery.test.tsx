@@ -59,6 +59,14 @@ it("replays an initial panel intent through its Solid pane and retires delivery 
   onTestFinished(() => {
     client.request = originalRequest;
   });
+  const expectDesktopRequests = (environmentId: string, called: boolean) => {
+    const assertion = called ? expect(request) : expect(request).not;
+    assertion.toHaveBeenCalledWith("environments.status", { environmentId });
+    assertion.toHaveBeenCalledWith("desktop.observe", {
+      source: { kind: "environment", environmentId },
+      control: false,
+    });
+  };
   rememberSessionPanelToggle("desktop", toggle(true, "requested-desktop"));
   const container = document.body.appendChild(createApplicationContextProvider(fixture.context));
   onTestFinished(() => container.remove());
@@ -74,13 +82,7 @@ it("replays an initial panel intent through its Solid pane and retires delivery 
   await waitForSolid(() => expect(query(".agent-chat__composer-combobox textarea")).not.toBeNull());
   await vi.dynamicImportSettled();
   await waitForSolid(() => {
-    expect(request).toHaveBeenCalledWith("environments.status", {
-      environmentId: "requested-desktop",
-    });
-    expect(request).toHaveBeenCalledWith("desktop.observe", {
-      source: { kind: "environment", environmentId: "requested-desktop" },
-      control: false,
-    });
+    expectDesktopRequests("requested-desktop", true);
     expect(query(".desktop-credentials input[type='password']")).not.toBeNull();
   });
   window.dispatchEvent(toggle(false));
@@ -90,11 +92,5 @@ it("replays an initial panel intent through its Solid pane and retires delivery 
   request.mockClear();
   window.dispatchEvent(toggle(true, "retired-desktop"));
   await vi.dynamicImportSettled();
-  expect(request).not.toHaveBeenCalledWith("environments.status", {
-    environmentId: "retired-desktop",
-  });
-  expect(request).not.toHaveBeenCalledWith("desktop.observe", {
-    source: { kind: "environment", environmentId: "retired-desktop" },
-    control: false,
-  });
+  expectDesktopRequests("retired-desktop", false);
 });

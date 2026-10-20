@@ -11,11 +11,7 @@ import {
 } from "../../test-helpers/gateway-client.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import { ChatPaneRuntime } from "./chat-pane-render.ts";
-import {
-  createTestChatPane,
-  createPaneTestHost,
-  type TestChatPane,
-} from "./chat-pane.test-support.ts";
+import { createTestChatPane, createPaneTestHost } from "./chat-pane.test-support.ts";
 import { refreshPageChat } from "./chat-state-refresh.ts";
 
 const responseMethods = [
@@ -77,22 +73,19 @@ export function createMountedPanes(
   });
   const fixture = createTestChatPane({ client });
   const context = fixture.pane.context;
-  const runtimeConfig = createRuntimeConfigCapability(context.gateway);
-  const placementStartup = createApplicationPlacementStartup(context);
-  Object.assign(context, {
+  const { runtimeConfig, placementStartup } = Object.assign(context, {
     config: createApplicationConfigCapability({ resourceBasePath: "" }),
-    runtimeConfig,
-    placementStartup,
+    runtimeConfig: createRuntimeConfigCapability(context.gateway),
+    placementStartup: createApplicationPlacementStartup(context),
   });
-  const panes: TestChatPane[] = [];
+  const panes: (typeof fixture.pane)[] = [];
   const mount = (sessionKey: string, paneAgentId = agentId) => {
-    const pane =
-      panes.length === 0
-        ? fixture.pane
-        : (createPaneTestHost(
-            "openclaw-chat-runtime-test",
-            ChatPaneRuntime,
-          ) as unknown as TestChatPane);
+    const pane = (panes.length === 0
+      ? fixture.pane
+      : createPaneTestHost(
+          "openclaw-chat-runtime-test",
+          ChatPaneRuntime,
+        )) as unknown as typeof fixture.pane;
     // Configure the detached owner before the view starts its connection lifecycle.
     Object.defineProperty(pane, "isConnected", { configurable: true, value: false });
     pane.context = context;
@@ -114,7 +107,7 @@ export function createMountedPanes(
   return { ...fixture, context, mount };
 }
 
-export function refreshPane(pane: TestChatPane) {
+export function refreshPane(pane: ReturnType<typeof createTestChatPane>["pane"]) {
   return refreshPageChat(pane.state, {
     historyLoad: loadChatHistory(pane.state, { deferBranches: true }),
     awaitHistory: true,

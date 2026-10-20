@@ -7,12 +7,16 @@ import {
   nativeHistorySeq,
 } from "./chat-pane-history.test-support.ts";
 
+const page = (seq: number, nextOffset: number, hasMore = true) => ({
+  messages: [nativeHistoryMessage(seq)],
+  hasMore,
+  nextOffset,
+});
+
 function setup(notifyOnObserve = false) {
-  const request = vi.fn(async (_method: string, params: { offset: number }) => ({
-    messages: [nativeHistoryMessage(-params.offset)],
-    hasMore: true,
-    nextOffset: params.offset + 1,
-  }));
+  const request = vi.fn(async (_method: string, { offset }: { offset: number }) =>
+    page(-offset, offset + 1),
+  );
   const fixture = createNativeShowEarlierPane(request);
   const { pane, thread } = fixture;
   const sentinel = thread.appendChild(document.createElement("div"));
@@ -104,11 +108,7 @@ it.each(["failure", "exhaustion"] as const)("stops automatic fills after %s", as
   if (outcome === "failure") {
     request.mockRejectedValue(new Error("history unavailable"));
   } else {
-    request.mockResolvedValue({
-      messages: [nativeHistoryMessage(1)],
-      hasMore: false,
-      nextOffset: 3,
-    });
+    request.mockResolvedValue(page(1, 3, false));
   }
   await intersect();
   await intersect();
@@ -126,11 +126,7 @@ it.each([
   const { pane, state, thread, request, setHeight, intersect } = setup(true);
   const pagination = { hasMore: true, nextOffset: offset, totalMessages: offset === 0 ? 1_100 : 4 };
   state.chatHistoryPagination = { ...pagination };
-  request.mockResolvedValue({
-    messages: [nativeHistoryMessage(1)],
-    hasMore: false,
-    nextOffset: offset + 1,
-  });
+  request.mockResolvedValue(page(1, offset + 1, false));
   setHeight(height);
   try {
     await intersect();
