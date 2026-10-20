@@ -1,3 +1,4 @@
+import type { Page } from "playwright";
 import { expect as expectBrowser } from "playwright/test";
 import { expect, it } from "vitest";
 import { defaultControlUiFeatureMethods } from "../test-helpers/control-ui-e2e.ts";
@@ -9,41 +10,50 @@ import {
   sessionsListResponse,
   waitForSessionRosterHydration,
 } from "./session-management.test-support.ts";
+import { sessionPerson } from "./session-ownership-fixtures.test-support.ts";
 import { selectAllSidebarSessions } from "./sidebar-navigation.test-support.ts";
 import { chooseSidebarOwner, closeSidebarMenu } from "./sidebar-session-menu.test-support.ts";
 
 const suite = createSessionManagementE2eSuite();
 const sessionKey = "agent:main:design-review";
 const homeKey = "agent:main:my-work";
-const person = (id: string, label: string) => ({
-  type: "human" as const,
-  id,
-  label,
-  identity: { type: "profile" as const, id },
-});
-const ada = person("profile-ada", "Ada");
-const bob = person("profile-bob", "Bob");
-const home = {
-  key: homeKey,
-  sessionId: "my-work",
-  kind: "direct",
-  label: "My work",
-  owner: { actor: bob },
-  createdActor: bob,
-  updatedAt: Date.now() - 120_000,
-  hiddenFromInvolvingMe: false,
-};
-const mentioned = {
-  key: sessionKey,
-  sessionId: "design-review",
-  kind: "direct",
-  label: "Design review",
-  owner: { actor: ada },
-  createdActor: ada,
-  updatedAt: Date.now() - 60_000,
-  hiddenFromInvolvingMe: false,
-};
+const ada = sessionPerson("profile-ada", "Ada");
+const bob = sessionPerson("profile-bob", "Bob");
+function session(key: string, label: string, actor: typeof ada, age: number) {
+  return {
+    key,
+    sessionId: key.slice("agent:main:".length),
+    kind: "direct",
+    label,
+    owner: { actor },
+    createdActor: actor,
+    updatedAt: Date.now() - age,
+    hiddenFromInvolvingMe: false,
+  };
+}
+const home = session(homeKey, "My work", bob, 120_000);
+const mentioned = session(sessionKey, "Design review", ada, 60_000);
 const list = (rows: unknown[]) => ({ ...sessionsListResponse(rows), owners: [ada, bob] });
+
+function installGateway(page: Page, multiple: boolean, collaboration = false) {
+  return installMockGateway(page, {
+    sessionKey: homeKey,
+    hasMultipleSessionSharingIdentities: multiple,
+    featureMethods: [...defaultControlUiFeatureMethods, "sessions.setInvolvement"],
+    historyMessages: [
+      { role: "assistant", content: [{ type: "text", text: "Ready for collaboration." }] },
+    ],
+    ...(collaboration
+      ? {
+          presenceUsers: [{ self: true, id: bob.id, identity: bob.identity, name: bob.label }],
+        }
+      : {}),
+    methodResponses: {
+      "sessions.list": list([home, mentioned]),
+      ...(collaboration ? { "sessions.setInvolvement": { ok: true } } : {}),
+    },
+  });
+}
 
 suite.define(() => {
   it.each([false, true])(
@@ -52,15 +62,7 @@ suite.define(() => {
       await suite.withPage(
         { viewport: { width: 1200, height: 820 }, colorScheme: "dark" },
         async ({ page }) => {
-          await installMockGateway(page, {
-            sessionKey: homeKey,
-            hasMultipleSessionSharingIdentities: multiple,
-            featureMethods: [...defaultControlUiFeatureMethods, "sessions.setInvolvement"],
-            historyMessages: [
-              { role: "assistant", content: [{ type: "text", text: "Ready for collaboration." }] },
-            ],
-            methodResponses: { "sessions.list": list([home, mentioned]) },
-          });
+          await installGateway(page, multiple);
           await page.goto(controlUiSessionUrl(suite.server.baseUrl, homeKey));
           await waitForSessionRosterHydration(page);
           const target = page.locator('[data-session-key="' + sessionKey + '"]');
@@ -85,19 +87,7 @@ suite.define(() => {
     await suite.withPage(
       { viewport: { width: 1200, height: 820 }, colorScheme: "dark" },
       async ({ page }) => {
-        const gateway = await installMockGateway(page, {
-          sessionKey: homeKey,
-          hasMultipleSessionSharingIdentities: true,
-          presenceUsers: [{ self: true, id: bob.id, identity: bob.identity, name: bob.label }],
-          featureMethods: [...defaultControlUiFeatureMethods, "sessions.setInvolvement"],
-          historyMessages: [
-            { role: "assistant", content: [{ type: "text", text: "Ready for collaboration." }] },
-          ],
-          methodResponses: {
-            "sessions.list": list([home, mentioned]),
-            "sessions.setInvolvement": { ok: true },
-          },
-        });
+        const gateway = await installGateway(page, true, true);
         await page.goto(controlUiSessionUrl(suite.server.baseUrl, homeKey));
         await waitForSessionRosterHydration(page);
         await selectAllSidebarSessions(page);

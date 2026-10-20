@@ -45,54 +45,45 @@ export async function routeAvatarFixtures(page: Page, fixtures: readonly AvatarF
   );
 }
 
-export async function captureUiProof(
-  owner: { readonly artifactDir: string },
+type ProofOwner = { readonly artifactDir: string };
+type SurfaceProof = (
+  owner: ProofOwner,
   surface: Locator,
   fileName: string,
   content: readonly Locator[],
+) => Promise<void>;
+
+async function writeProof(
+  owner: ProofOwner,
+  directory: string,
+  fileName: string,
+  capture: () => Promise<Buffer>,
 ) {
   if (!captureUiProofEnabled) {
     return;
   }
-  await mkdir(path.join(owner.artifactDir, "drafts-ux"), { recursive: true });
-  await writeFile(
-    path.join(owner.artifactDir, "drafts-ux", fileName),
-    await takeControlUiViewportScreenshot(surface.page(), surface, content),
-  );
+  const output = path.join(owner.artifactDir, directory);
+  await mkdir(output, { recursive: true });
+  await writeFile(path.join(output, fileName), await capture());
 }
 
-export async function captureSessionOwnerProof(
-  owner: { readonly artifactDir: string },
-  page: Page,
-  fileName: string,
-) {
-  if (!captureUiProofEnabled) {
-    return;
-  }
-  await mkdir(path.join(owner.artifactDir, "session-owner-stack"), { recursive: true });
-  await writeFile(
-    path.join(owner.artifactDir, "session-owner-stack", fileName),
-    await takeControlUiElementScreenshot(page, page.locator(".sidebar-sessions"), [
+export const captureUiProof: SurfaceProof = (owner, surface, fileName, content) =>
+  writeProof(owner, "drafts-ux", fileName, () =>
+    takeControlUiViewportScreenshot(surface.page(), surface, content),
+  );
+
+export function captureSessionOwnerProof(owner: ProofOwner, page: Page, fileName: string) {
+  return writeProof(owner, "session-owner-stack", fileName, () =>
+    takeControlUiElementScreenshot(page, page.locator(".sidebar-sessions"), [
       page.locator(".sidebar-recent-session").first(),
     ]),
   );
 }
 
-export async function captureSessionOwnerPageProof(
-  owner: { readonly artifactDir: string },
-  surface: Locator,
-  fileName: string,
-  content: readonly Locator[],
-) {
-  if (!captureUiProofEnabled) {
-    return;
-  }
-  await mkdir(path.join(owner.artifactDir, "session-owner-stack"), { recursive: true });
-  await writeFile(
-    path.join(owner.artifactDir, "session-owner-stack", fileName),
-    await takeControlUiViewportScreenshot(surface.page(), surface, content),
+export const captureSessionOwnerPageProof: SurfaceProof = (owner, surface, fileName, content) =>
+  writeProof(owner, "session-owner-stack", fileName, () =>
+    takeControlUiViewportScreenshot(surface.page(), surface, content),
   );
-}
 
 export async function openSidebarSortMenu(page: Page) {
   const filterAndSort = page.getByRole("button", { name: "Filter & sort", exact: true });

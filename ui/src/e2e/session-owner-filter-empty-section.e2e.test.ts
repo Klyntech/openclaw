@@ -8,6 +8,7 @@ import {
   installMockGateway,
   sessionsListResponse,
 } from "./session-management.test-support.ts";
+import { sessionPerson } from "./session-ownership-fixtures.test-support.ts";
 import { selectAllSidebarSessions } from "./sidebar-navigation.test-support.ts";
 import {
   chooseSidebarOwner,
@@ -29,12 +30,9 @@ suite.define(() => {
     async ({ hasMore, involvingMe }) => {
       const context = await suite.browser.newContext({ viewport: { height: 800, width: 1200 } });
       const page = await context.newPage();
-      const owners = Array.from({ length: 8 }, (_, index) => ({
-        type: "human" as const,
-        id: `profile-${index}`,
-        identity: { type: "profile" as const, id: `profile-${index}` },
-        label: `Owner ${index + 1}`,
-      }));
+      const owners = Array.from({ length: 8 }, (_, index) =>
+        sessionPerson(`profile-${index}`, `Owner ${index + 1}`),
+      );
       const allSessions = {
         ...sessionsListResponse(
           owners.map((actor, index) => ({
@@ -78,16 +76,9 @@ suite.define(() => {
         await chooseSidebarOwner(page, involvingMe ? "involving-me" : "owner:profile-0");
         await expectBrowser(people).toHaveCount(1);
         await expectBrowser(people).toContainText("Owner 1 session");
-        await expect
-          .poll(async () =>
-            (await gateway.getRequests("sessions.list")).some((request) => {
-              const params = request.params as
-                | { ownerId?: string; involvingMe?: boolean }
-                | undefined;
-              return involvingMe ? params?.involvingMe === true : params?.ownerId === "profile-0";
-            }),
-          )
-          .toBe(true);
+        await gateway.waitForRequest("sessions.list", {
+          match: involvingMe ? { involvingMe: true } : { ownerId: "profile-0" },
+        });
         await captureUiProof(suite, page, `filtered-has-more-${hasMore}.png`);
         await expectBrowser(other).toHaveCount(0);
 
