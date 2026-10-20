@@ -69,6 +69,21 @@ function createDatabase(location: string) {
   return database;
 }
 
+function databaseFixture(prefix: string) {
+  const location = path.join(tempDirs.make(prefix), "proof.sqlite");
+  const database = createDatabase(location);
+  return {
+    database,
+    location,
+    [Symbol.dispose]() {
+      if (database.isOpen) {
+        database.close();
+      }
+      retireSqliteDatabaseAdmissionForPath(location);
+    },
+  };
+}
+
 function recordsFor(location: string) {
   return captureSqliteDatabaseAdmissions().filter((record) => record.location === location);
 }
@@ -134,50 +149,42 @@ it("retains active source receipts until their last release without suppressing 
 });
 
 it("bounds cold session receipts by bytes without evicting hot receipts or reviving stale ones", () => {
-  const location = path.join(tempDirs.make("sqlite-admission-scope-budget-"), "proof.sqlite");
-  const database = createDatabase(location);
-  try {
-    const cold = readSqliteDatabaseScopedWriteToken(database, "cold");
-    const hot = readSqliteDatabaseScopedWriteToken(database, "hot");
-    const stale = structuredClone(recordsFor(location));
-    const scopes = Array.from({ length: 160 }, (_, index) => `${index}:${"x".repeat(4096)}`);
-    for (const key of scopes) {
-      expect(readSqliteDatabaseScopedWriteToken(database, key)).toBeTypeOf("string");
-      expect(readSqliteDatabaseScopedWriteToken(database, "hot")).toBe(hot);
-    }
-    const retained = () => recordsFor(location)[0]!.writeScopes;
-    expect([...retained().keys()].reduce((bytes, key) => bytes + key.length * 2, 0)).toBeLessThan(
-      1024 * 1024,
-    );
-    expect(retained().has('["key","cold"]')).toBe(false);
-    installSqliteDatabaseAdmissions(stale);
-    expect(retained().has('["key","cold"]')).toBe(false);
-    expect(readSqliteDatabaseScopedWriteToken(database, "cold")).not.toBe(cold);
-    expect(readSqliteDatabaseScopedWriteTokensForPath(location, scopes)).toHaveLength(
-      scopes.length,
-    );
-    const oversized = "x".repeat(600_000);
-    const before = readSqliteDatabaseScopedWriteToken(database, oversized);
-    expect(before).toBeTypeOf("string");
-    let pending: string | undefined;
-    withSqlitePostCommitPublications(database, () =>
-      runSqliteImmediateTransactionSync(database, () => {
-        database.prepare("UPDATE proof SET value = 43").run();
-        pending = readSqliteDatabasePendingScopedWriteToken(database, oversized);
-      }),
-    );
-    expect(pending).toBeTypeOf("string");
-    expect(pending).not.toBe(before);
-    expect(readSqliteDatabaseScopedWriteToken(database, oversized)).toBe(pending);
-    expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 43 });
-    database.close();
-    expect(recordsFor(location)).toEqual([]);
-  } finally {
-    if (database.isOpen) {
-      database.close();
-    }
-    retireSqliteDatabaseAdmissionForPath(location);
+  using fixture = databaseFixture("sqlite-admission-scope-budget-");
+  const { location, database } = fixture;
+
+  const cold = readSqliteDatabaseScopedWriteToken(database, "cold");
+  const hot = readSqliteDatabaseScopedWriteToken(database, "hot");
+  const stale = structuredClone(recordsFor(location));
+  const scopes = Array.from({ length: 160 }, (_, index) => `${index}:${"x".repeat(4096)}`);
+  for (const key of scopes) {
+    expect(readSqliteDatabaseScopedWriteToken(database, key)).toBeTypeOf("string");
+    expect(readSqliteDatabaseScopedWriteToken(database, "hot")).toBe(hot);
   }
+  const retained = () => recordsFor(location)[0]!.writeScopes;
+  expect([...retained().keys()].reduce((bytes, key) => bytes + key.length * 2, 0)).toBeLessThan(
+    1024 * 1024,
+  );
+  expect(retained().has('["key","cold"]')).toBe(false);
+  installSqliteDatabaseAdmissions(stale);
+  expect(retained().has('["key","cold"]')).toBe(false);
+  expect(readSqliteDatabaseScopedWriteToken(database, "cold")).not.toBe(cold);
+  expect(readSqliteDatabaseScopedWriteTokensForPath(location, scopes)).toHaveLength(scopes.length);
+  const oversized = "x".repeat(600_000);
+  const before = readSqliteDatabaseScopedWriteToken(database, oversized);
+  expect(before).toBeTypeOf("string");
+  let pending: string | undefined;
+  withSqlitePostCommitPublications(database, () =>
+    runSqliteImmediateTransactionSync(database, () => {
+      database.prepare("UPDATE proof SET value = 43").run();
+      pending = readSqliteDatabasePendingScopedWriteToken(database, oversized);
+    }),
+  );
+  expect(pending).toBeTypeOf("string");
+  expect(pending).not.toBe(before);
+  expect(readSqliteDatabaseScopedWriteToken(database, oversized)).toBe(pending);
+  expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 43 });
+  database.close();
+  expect(recordsFor(location)).toEqual([]);
 });
 
 it("retires the final closed handle's facts while preserving open siblings and descriptor custody", () => {
@@ -230,108 +237,88 @@ it("retires the final closed handle's facts while preserving open siblings and d
 });
 
 it("reuses physical catalog facts after unsealed close and invalidates them on DDL", () => {
-  const location = path.join(tempDirs.make("sqlite-admission-process-facts-"), "proof.sqlite");
-  const database = createDatabase(location);
+  using fixture = databaseFixture("sqlite-admission-process-facts-");
+  const { database } = fixture;
   const admitted = getAdmittedSqliteSchemaFacts(database);
   publishSqliteDatabaseAdmission(database, key, "connection-scoped");
   database.close();
+
+  database.open();
+  const observation = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);
   try {
-    database.open();
-    const observation = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);
-    try {
-      admitSqliteSchema(database);
-      expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).toBe(admitted?.admissionId);
-      expect(observation.queries).toEqual([]);
-    } finally {
-      observation.restore();
-    }
-    expect(getSqliteDatabaseAdmission(database, key)).toBeUndefined();
-    database.exec("ALTER TABLE proof ADD COLUMN added TEXT");
-    database.close();
-    database.open();
     admitSqliteSchema(database);
-    expect(getAdmittedSqliteSchemaFacts(database)?.tableSql.get("proof")).toContain("added TEXT");
-    expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).not.toBe(admitted?.admissionId);
-    database.prepare("UPDATE proof SET value = 43").run();
-    expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 43 });
+    expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).toBe(admitted?.admissionId);
+    expect(observation.queries).toEqual([]);
   } finally {
-    database.close();
-    retireSqliteDatabaseAdmissionForPath(location);
+    observation.restore();
   }
+  expect(getSqliteDatabaseAdmission(database, key)).toBeUndefined();
+  database.exec("ALTER TABLE proof ADD COLUMN added TEXT");
+  database.close();
+  database.open();
+  admitSqliteSchema(database);
+  expect(getAdmittedSqliteSchemaFacts(database)?.tableSql.get("proof")).toContain("added TEXT");
+  expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).not.toBe(admitted?.admissionId);
+  database.prepare("UPDATE proof SET value = 43").run();
+  expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 43 });
 });
 
 it.each([undefined, "process"] as const)(
   "preserves path-load lifetime when the loader closes its handle (%s)",
   (lifetime) => {
-    const location = path.join(tempDirs.make("sqlite-admission-loader-close-"), "proof.sqlite");
-    const database = createDatabase(location);
+    using fixture = databaseFixture("sqlite-admission-loader-close-");
+    const { location, database } = fixture;
     const loadedKey = { ...key, name: "test.loader-close", lifetime };
-    try {
-      expect(
-        getOrLoadSqliteDatabaseAdmissionForPath(location, loadedKey, () => {
-          database.close();
-          return "loaded";
-        }),
-      ).toBe("loaded");
 
-      database.open();
-      expect(getSqliteDatabaseAdmission(database, loadedKey)).toBe(
-        lifetime === "process" ? "loaded" : undefined,
-      );
-    } finally {
-      if (database.isOpen) {
+    expect(
+      getOrLoadSqliteDatabaseAdmissionForPath(location, loadedKey, () => {
         database.close();
-      }
-      retireSqliteDatabaseAdmissionForPath(location);
-    }
+        return "loaded";
+      }),
+    ).toBe("loaded");
+
+    database.open();
+    expect(getSqliteDatabaseAdmission(database, loadedKey)).toBe(
+      lifetime === "process" ? "loaded" : undefined,
+    );
   },
 );
 
 it("revokes retained validation when corruption is reported after native close", () => {
-  const location = path.join(tempDirs.make("sqlite-admission-closed-corruption-"), "proof.sqlite");
-  const database = createDatabase(location);
+  using fixture = databaseFixture("sqlite-admission-closed-corruption-");
+  const { database } = fixture;
   const admitted = getAdmittedSqliteSchemaFacts(database);
   database.close();
   revokeSqliteDatabaseAdmissions(database);
-  try {
-    database.open();
-    admitSqliteSchema(database);
-    expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).not.toBe(admitted?.admissionId);
-    expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 42 });
-  } finally {
-    database.close();
-    retireSqliteDatabaseAdmissionForPath(location);
-  }
+
+  database.open();
+  admitSqliteSchema(database);
+  expect(getAdmittedSqliteSchemaFacts(database)?.admissionId).not.toBe(admitted?.admissionId);
+  expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value: 42 });
 });
 
 it("keeps committed and pending row-cache tokens distinct across readmission", () => {
-  const location = path.join(tempDirs.make("sqlite-admission-tokens-"), "proof.sqlite");
-  const database = createDatabase(location);
+  using fixture = databaseFixture("sqlite-admission-tokens-");
+  const { location, database } = fixture;
   database.close();
   let previous: string | undefined;
-  try {
-    for (const value of [43, 44]) {
-      database.open();
-      admitSqliteSchema(database);
-      let pending: string | undefined;
-      withSqlitePostCommitPublications(database, () =>
-        runSqliteImmediateTransactionSync(database, () => {
-          database.prepare("UPDATE proof SET value = ?").run(value);
-          pending = readSqliteDatabasePendingWriteToken(database);
-        }),
-      );
-      const committed = readSqliteDatabaseWriteTokenForPath(location);
-      expect(committed).toBe(pending);
-      expect(committed).not.toBe(previous);
-      expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value });
-      previous = committed;
-      database.close();
-    }
-  } finally {
-    if (database.isOpen) {
-      database.close();
-    }
-    retireSqliteDatabaseAdmissionForPath(location);
+
+  for (const value of [43, 44]) {
+    database.open();
+    admitSqliteSchema(database);
+    let pending: string | undefined;
+    withSqlitePostCommitPublications(database, () =>
+      runSqliteImmediateTransactionSync(database, () => {
+        database.prepare("UPDATE proof SET value = ?").run(value);
+        pending = readSqliteDatabasePendingWriteToken(database);
+      }),
+    );
+    const committed = readSqliteDatabaseWriteTokenForPath(location);
+    expect(committed).toBe(pending);
+    expect(committed).not.toBe(previous);
+    expect(database.prepare("SELECT value FROM proof").get()).toEqual({ value });
+    previous = committed;
+    database.close();
   }
 });
 
@@ -726,38 +713,34 @@ const key = { name: "test.engine-admission", read: (value: unknown) => value };
 const schemaKey = { ...key, name: "test.engine-schema-admission", schemaDependent: true };
 
 it("carries typed owner facts through publication, replacement and worker cloning", () => {
-  const location = path.join(tempDirs.make("sqlite-admission-typed-"), "proof.sqlite");
-  const database = createDatabase(location);
+  using fixture = databaseFixture("sqlite-admission-typed-");
+  const { location, database } = fixture;
   const typedKey: SqliteDatabaseFactKey<{ engine: string; version: number }> = {
     name: "test.typed-engine-fact",
   };
-  try {
-    publishSqliteDatabaseAdmission(database, typedKey, { engine: "sqlite", version: 1 });
-    expect(getSqliteDatabaseAdmission(database, typedKey)).toEqual({
-      engine: "sqlite",
-      version: 1,
-    });
-    publishSqliteDatabaseAdmission(database, typedKey, { engine: "sqlite", version: 2 });
-    expect(getOrLoadSqliteDatabaseAdmissionForPath(location, typedKey, () => undefined)).toEqual({
-      engine: "sqlite",
-      version: 2,
-    });
-    const transferred = structuredClone(recordsFor(location)[0]!.facts.get(typedKey.name)!);
-    expect(readSqliteDatabaseAdmissionFact(transferred, typedKey)).toEqual({
-      engine: "sqlite",
-      version: 2,
-    });
-  } finally {
-    database.close();
-    retireSqliteDatabaseAdmissionForPath(location);
-  }
+
+  publishSqliteDatabaseAdmission(database, typedKey, { engine: "sqlite", version: 1 });
+  expect(getSqliteDatabaseAdmission(database, typedKey)).toEqual({
+    engine: "sqlite",
+    version: 1,
+  });
+  publishSqliteDatabaseAdmission(database, typedKey, { engine: "sqlite", version: 2 });
+  expect(getOrLoadSqliteDatabaseAdmissionForPath(location, typedKey, () => undefined)).toEqual({
+    engine: "sqlite",
+    version: 2,
+  });
+  const transferred = structuredClone(recordsFor(location)[0]!.facts.get(typedKey.name)!);
+  expect(readSqliteDatabaseAdmissionFact(transferred, typedKey)).toEqual({
+    engine: "sqlite",
+    version: 2,
+  });
 });
 
 it.each(["committed", "native", "sqlite-transaction", "postgres-transaction"] as const)(
   "decodes admission values once at publication (%s)",
   (scope) => {
-    const location = path.join(tempDirs.make("sqlite-admission-decode-"), "proof.sqlite");
-    const database = createDatabase(location);
+    using fixture = databaseFixture("sqlite-admission-decode-");
+    const { location, database } = fixture;
     const connection = scope === "postgres-transaction" ? postgresConnection(database) : database;
     const read = vi.fn((value: unknown) =>
       typeof value === "string" ? value.toUpperCase() : undefined,
@@ -773,35 +756,31 @@ it.each(["committed", "native", "sqlite-transaction", "postgres-transaction"] as
       expect(getSqliteDatabaseAdmission(connection, decodedKey)).toBe("REPLACEMENT");
       expect(read).toHaveBeenCalledTimes(2);
     };
-    try {
-      if (scope === "native") {
-        const finish = beginSqliteDatabaseAdmissionOperation(database);
-        try {
-          publishAndRead();
-        } finally {
-          finish();
-        }
-        expect(getSqliteDatabaseAdmission(connection, decodedKey)).toBeUndefined();
-      } else {
-        if (scope.endsWith("transaction")) {
-          runSqliteImmediateTransactionSync(connection, publishAndRead);
-        } else {
-          publishAndRead();
-        }
-        expect(getSqliteDatabaseAdmission(connection, decodedKey)).toBe("REPLACEMENT");
-        expect(getOrLoadSqliteDatabaseAdmissionForPath(location, decodedKey, () => "stale")).toBe(
-          "REPLACEMENT",
-        );
-        expect(read).toHaveBeenCalledTimes(2);
 
-        const transferred = structuredClone(recordsFor(location)[0]!.facts.get(decodedKey.name)!);
-        expect(readSqliteDatabaseAdmissionFact(transferred, decodedKey)).toBe("REPLACEMENT");
-        expect(readSqliteDatabaseAdmissionFact(transferred, decodedKey)).toBe("REPLACEMENT");
-        expect(read).toHaveBeenCalledTimes(3);
+    if (scope === "native") {
+      const finish = beginSqliteDatabaseAdmissionOperation(database);
+      try {
+        publishAndRead();
+      } finally {
+        finish();
       }
-    } finally {
-      database.close();
-      retireSqliteDatabaseAdmissionForPath(location);
+      expect(getSqliteDatabaseAdmission(connection, decodedKey)).toBeUndefined();
+    } else {
+      if (scope.endsWith("transaction")) {
+        runSqliteImmediateTransactionSync(connection, publishAndRead);
+      } else {
+        publishAndRead();
+      }
+      expect(getSqliteDatabaseAdmission(connection, decodedKey)).toBe("REPLACEMENT");
+      expect(getOrLoadSqliteDatabaseAdmissionForPath(location, decodedKey, () => "stale")).toBe(
+        "REPLACEMENT",
+      );
+      expect(read).toHaveBeenCalledTimes(2);
+
+      const transferred = structuredClone(recordsFor(location)[0]!.facts.get(decodedKey.name)!);
+      expect(readSqliteDatabaseAdmissionFact(transferred, decodedKey)).toBe("REPLACEMENT");
+      expect(readSqliteDatabaseAdmissionFact(transferred, decodedKey)).toBe("REPLACEMENT");
+      expect(read).toHaveBeenCalledTimes(3);
     }
   },
 );

@@ -15,7 +15,7 @@ afterEach(() => {
   resetLogger();
 });
 
-function fixture(replacement = "bravo"): { pathname: string; database: DatabaseSync } {
+function fixture(replacement = "bravo") {
   const pathname = path.join(tempDirs.make("index-corruption-"), "state.sqlite");
   const database = new DatabaseSync(pathname);
   database.exec(`
@@ -27,61 +27,59 @@ function fixture(replacement = "bravo"): { pathname: string; database: DatabaseS
   `);
   database.close();
   corruptSqliteIndexKey(pathname, "sqlite_autoindex_audit_events_1", "alpha", replacement);
-  return { pathname, database: new DatabaseSync(pathname) };
+  const reopened = new DatabaseSync(pathname);
+  return { pathname, database: reopened, [Symbol.dispose]: () => reopened.close() };
 }
 
 describe("explicit index corruption repair", () => {
   it.each(["bravo", "omega"])(
     "preserves table rows and backs up before UNIQUE index repair (%s)",
     async (replacement) => {
-      const { pathname, database } = fixture(replacement);
+      using state = fixture(replacement);
+      const { pathname, database } = state;
       const file = path.join(path.dirname(pathname), "repair.log");
       setLoggerOverride({ level: "info", consoleLevel: "silent", file });
       let clock = Date.now();
       vi.spyOn(Date, "now").mockImplementation(() => clock);
-      try {
-        const before = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
-        const backup = vi.fn(() => {
-          clock += 1_200;
-          expect(database.prepare("PRAGMA integrity_check").get()?.integrity_check).not.toBe("ok");
-          expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(before);
-        });
-        expect(
-          repairSqliteIndexCorruption(database, pathname, { backup, assertCurrent: () => {} }),
-        ).toEqual(["sqlite_autoindex_audit_events_1"]);
-        expect(backup).toHaveBeenCalledOnce();
-        await flushLogger();
-        const holds = fs
-          .readFileSync(file, "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line) as Record<string, unknown>)
-          .filter((record) => record.message === "slow SQLite transaction hold");
-        expect(holds).toContainEqual(
-          expect.objectContaining({
-            "1": expect.objectContaining({
-              database: pathname,
-              operation: "sqlite.index-corruption-repair",
-              mode: "immediate",
-              elapsedMs: 1_200,
-            }),
-          }),
-        );
-        expect(database.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
-        expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-        expect(database.prepare("SELECT event_id FROM audit_links").all()).toEqual([
-          { event_id: "alpha" },
-        ]);
+      const before = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
+      const backup = vi.fn(() => {
+        clock += 1_200;
+        expect(database.prepare("PRAGMA integrity_check").get()?.integrity_check).not.toBe("ok");
         expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(before);
-        expect(
-          database.prepare("SELECT id FROM audit_events WHERE event_id = 'alpha'").get(),
-        ).toEqual({ id: 1 });
-        expect(() => database.exec("INSERT INTO audit_events(event_id) VALUES ('alpha')")).toThrow(
-          /UNIQUE/,
-        );
-      } finally {
-        database.close();
-      }
+      });
+      expect(
+        repairSqliteIndexCorruption(database, pathname, { backup, assertCurrent: () => {} }),
+      ).toEqual(["sqlite_autoindex_audit_events_1"]);
+      expect(backup).toHaveBeenCalledOnce();
+      await flushLogger();
+      const holds = fs
+        .readFileSync(file, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((record) => record.message === "slow SQLite transaction hold");
+      expect(holds).toContainEqual(
+        expect.objectContaining({
+          "1": expect.objectContaining({
+            database: pathname,
+            operation: "sqlite.index-corruption-repair",
+            mode: "immediate",
+            elapsedMs: 1_200,
+          }),
+        }),
+      );
+      expect(database.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+      expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      expect(database.prepare("SELECT event_id FROM audit_links").all()).toEqual([
+        { event_id: "alpha" },
+      ]);
+      expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(before);
+      expect(
+        database.prepare("SELECT id FROM audit_events WHERE event_id = 'alpha'").get(),
+      ).toEqual({ id: 1 });
+      expect(() => database.exec("INSERT INTO audit_events(event_id) VALUES ('alpha')")).toThrow(
+        /UNIQUE/,
+      );
     },
   );
 
@@ -101,75 +99,64 @@ describe("explicit index corruption repair", () => {
   ])(
     "preserves the damaged image and rolls back after $failure failure",
     ({ failure, sql, error }) => {
-      const { pathname, database } = fixture();
-      try {
-        if (sql) {
-          database.exec(sql);
-        }
-        const findings = database.prepare("PRAGMA integrity_check").all();
-        const rows = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
-        const links = database.prepare("SELECT event_id FROM audit_links").all();
-        const backup = vi.fn(() => {
-          if (failure === "backup") {
-            throw new Error("backup full");
-          }
-        });
-        expect(() =>
-          repairSqliteIndexCorruption(database, pathname, { backup, assertCurrent: () => {} }),
-        ).toThrow(error);
-        expect(backup).toHaveBeenCalledOnce();
-        expect(database.prepare("PRAGMA integrity_check").all()).toEqual(findings);
-        expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
-        expect(database.prepare("SELECT event_id FROM audit_links").all()).toEqual(links);
-        expect(database.isTransaction).toBe(false);
-      } finally {
-        database.close();
+      using state = fixture();
+      const { pathname, database } = state;
+      if (sql) {
+        database.exec(sql);
       }
+      const findings = database.prepare("PRAGMA integrity_check").all();
+      const rows = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
+      const links = database.prepare("SELECT event_id FROM audit_links").all();
+      const backup = vi.fn(() => {
+        if (failure === "backup") {
+          throw new Error("backup full");
+        }
+      });
+      expect(() =>
+        repairSqliteIndexCorruption(database, pathname, { backup, assertCurrent: () => {} }),
+      ).toThrow(error);
+      expect(backup).toHaveBeenCalledOnce();
+      expect(database.prepare("PRAGMA integrity_check").all()).toEqual(findings);
+      expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
+      expect(database.prepare("SELECT event_id FROM audit_links").all()).toEqual(links);
+      expect(database.isTransaction).toBe(false);
     },
   );
 
   it("preserves the backup and rolls back when maintenance authority is lost during REINDEX", () => {
-    const { pathname, database } = fixture();
+    using state = fixture();
+    const { pathname, database } = state;
     const authority = new AbortController();
     const exec = database.exec.bind(database);
-    const write = vi.spyOn(database, "exec").mockImplementation((sql) => {
+    vi.spyOn(database, "exec").mockImplementation((sql) => {
       exec(sql);
       if (sql.startsWith("REINDEX ")) {
         authority.abort(new Error("maintenance authority lost after rebuild"));
       }
     });
-    try {
-      const findings = database.prepare("PRAGMA integrity_check").all();
-      const rows = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
-      expect(() =>
-        repairDoctorSqliteIndexCorruption(database, pathname, {
-          label: "audit",
-          assertCurrent: () => authority.signal.throwIfAborted(),
-        }),
-      ).toThrow("maintenance authority lost after rebuild");
-      expect(database.isTransaction).toBe(false);
-      expect(database.prepare("PRAGMA integrity_check").all()).toEqual(findings);
-      expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
-      const recovery = fs
-        .readdirSync(path.dirname(pathname))
-        .find((name) => name.startsWith("openclaw-index-recovery-"));
-      expect(recovery).toBeDefined();
-      const backup = new DatabaseSync(
-        path.join(path.dirname(pathname), recovery!, "database.sqlite"),
-        {
-          readOnly: true,
-        },
-      );
-      try {
-        expect(backup.prepare("PRAGMA integrity_check").all()).toEqual(findings);
-        expect(backup.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
-      } finally {
-        backup.close();
-      }
-    } finally {
-      write.mockRestore();
-      database.close();
-    }
+    const findings = database.prepare("PRAGMA integrity_check").all();
+    const rows = database.prepare("SELECT * FROM audit_events NOT INDEXED").all();
+    expect(() =>
+      repairDoctorSqliteIndexCorruption(database, pathname, {
+        label: "audit",
+        assertCurrent: () => authority.signal.throwIfAborted(),
+      }),
+    ).toThrow("maintenance authority lost after rebuild");
+    expect(database.isTransaction).toBe(false);
+    expect(database.prepare("PRAGMA integrity_check").all()).toEqual(findings);
+    expect(database.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
+    const recovery = fs
+      .readdirSync(path.dirname(pathname))
+      .find((name) => name.startsWith("openclaw-index-recovery-"));
+    expect(recovery).toBeDefined();
+    using backup = new DatabaseSync(
+      path.join(path.dirname(pathname), recovery!, "database.sqlite"),
+      {
+        readOnly: true,
+      },
+    );
+    expect(backup.prepare("PRAGMA integrity_check").all()).toEqual(findings);
+    expect(backup.prepare("SELECT * FROM audit_events NOT INDEXED").all()).toEqual(rows);
   });
 
   it("refuses structural damage mixed with an index finding without attempting repair", () => {
@@ -183,16 +170,12 @@ describe("explicit index corruption repair", () => {
     const bytes = fs.readFileSync(pathname);
     bytes[(rootPage - 1) * pageSize] = 0;
     fs.writeFileSync(pathname, bytes);
-    const damaged = new DatabaseSync(pathname);
-    try {
-      const backup = vi.fn();
-      expect(() =>
-        repairSqliteIndexCorruption(damaged, pathname, { backup, assertCurrent: () => {} }),
-      ).toThrow(/malformed|Unrecognized SQLite integrity finding/);
-      expect(backup).not.toHaveBeenCalled();
-      expect(fs.readFileSync(pathname)).toEqual(bytes);
-    } finally {
-      damaged.close();
-    }
+    using damaged = new DatabaseSync(pathname);
+    const backup = vi.fn();
+    expect(() =>
+      repairSqliteIndexCorruption(damaged, pathname, { backup, assertCurrent: () => {} }),
+    ).toThrow(/malformed|Unrecognized SQLite integrity finding/);
+    expect(backup).not.toHaveBeenCalled();
+    expect(fs.readFileSync(pathname)).toEqual(bytes);
   });
 });
