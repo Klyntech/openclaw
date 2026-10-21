@@ -25,9 +25,13 @@ apply to build stages, not the deployed gateway.
 
 1. Record a baseline for the current lean branch: startup duration, peak RSS,
    process exit reason, and extension initialization logs.
-2. Resolve the exact extension IDs and runtime dependency closure for Telegram,
-   NVIDIA, tools, configured media, and voice. Use the Dockerfile's supported
-   `OPENCLAW_EXTENSIONS` selection rather than deleting arbitrary core files.
+2. Use Render's Docker build-argument forwarding to pass the manifest-verified
+   `OPENCLAW_EXTENSIONS` selection in `render.yaml`. The initial selection is
+   `telegram,nvidia,memory-core,document-extract,image-generation-core,senseaudio,azure-speech,fish-audio-speech,talk-voice`.
+   This keeps the Telegram channel, NVIDIA provider, memory tools, document/media
+   handling, and common voice integrations while excluding unrelated optional
+   providers. Verify dependency closure and real feature behavior before merging;
+   a manifest ID alone does not prove a feature works end to end.
 3. Add a dedicated lean image/build CI lane. Verify selected extension manifests
    and fail if a required extension is missing.
 4. Profile heap, external memory, loaded modules, worker threads, and concurrent
