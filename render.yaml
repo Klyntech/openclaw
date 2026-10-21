@@ -8,13 +8,13 @@ services:
     dockerCommand: node openclaw.mjs gateway --allow-unconfigured
     healthCheckPath: /startupz
     envVars:
-      # Bound V8 old-space usage for the 512 MiB Render target. This is a
-      # starting guardrail, not proof that total process RSS fits the limit.
-      # Render exposes Docker-service env vars as build args too. Keep the
-      # image limited to the providers/features Nally needs instead of bundling
-      # every optional OpenClaw extension.
+      # Render passes Docker-service environment variables as build args too.
+      # Keep the image limited to Nally features instead of bundling every
+      # optional OpenClaw extension. These IDs were checked against manifests.
       - key: OPENCLAW_EXTENSIONS
         value: telegram,nvidia,memory-core,document-extract,image-generation-core,senseaudio,azure-speech,fish-audio-speech,talk-voice
+      # Bound V8 old-space usage for the 512 MiB target. This is only a
+      # starting guardrail, not proof that total process RSS fits the limit.
       - key: NODE_OPTIONS
         value: --max-old-space-size=256
       - key: OPENCLAW_GATEWAY_PORT
