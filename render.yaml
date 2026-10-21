@@ -10,7 +10,7 @@ services:
     envVars:
       # Render passes Docker-service environment variables as build args too.
       # Keep the image limited to Nally features instead of bundling every
-      # optional OpenClaw extension. These IDs were checked against manifests.
+      # optional OpenClaw extension. IDs are checked against extension metadata.
       - key: OPENCLAW_EXTENSIONS
         value: telegram,nvidia,memory-core,document-extract,image-generation-core,senseaudio,azure-speech,fish-audio-speech,talk-voice
       # Bound V8 old-space usage for the 512 MiB target. This is only a
