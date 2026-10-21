@@ -8,6 +8,10 @@ services:
     dockerCommand: node openclaw.mjs gateway --allow-unconfigured
     healthCheckPath: /startupz
     envVars:
+      # Start with a bounded V8 old-space heap. This is not a total RSS limit;
+      # verify peak container memory with Telegram, tools, and voice workloads.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=256
       - key: OPENCLAW_GATEWAY_PORT
         value: "8080"
       - key: OPENCLAW_GATEWAY_TOKEN
