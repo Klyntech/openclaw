@@ -54,7 +54,9 @@ RUN mkdir -p /out/packages /out/examples "/out/${OPENCLAW_BUNDLED_PLUGIN_DIR}" &
     node /tmp/docker-plugin-selection.mjs "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}" "$OPENCLAW_EXTENSIONS" \
       --required-platform-packages > /out/openclaw-required-platform-packages && \
     node /tmp/docker-plugin-selection.mjs "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}" "$OPENCLAW_EXTENSIONS" \
-      --required-bundled /tmp/package.json > /out/openclaw-workspace-plugin-dirs
+      --required-bundled /tmp/package.json > /out/openclaw-workspace-plugin-dirs && \
+    node /tmp/docker-plugin-selection.mjs "/tmp/${OPENCLAW_BUNDLED_PLUGIN_DIR}" "$OPENCLAW_EXTENSIONS" \
+      --build-workspace-plugin-dirs /tmp/package.json > /out/openclaw-build-plugin-workspace-dirs
 
 # Shared manifest-only inputs. Both installs start without node_modules so pnpm
 # never has to rename a dependency directory inherited from an OverlayFS layer.
@@ -93,6 +95,7 @@ COPY --from=workspace-deps /out/packages/ ./packages/
 COPY --from=workspace-deps /out/examples/ ./examples/
 COPY --from=workspace-deps /out/${OPENCLAW_BUNDLED_PLUGIN_DIR}/ ./${OPENCLAW_BUNDLED_PLUGIN_DIR}/
 COPY --from=workspace-deps /out/openclaw-workspace-plugin-dirs /tmp/openclaw-workspace-plugin-dirs
+COPY --from=workspace-deps /out/openclaw-build-plugin-workspace-dirs /tmp/openclaw-build-plugin-workspace-dirs
 COPY --from=workspace-deps /out/openclaw-selected-plugin-dirs /tmp/openclaw-selected-plugin-dirs
 COPY --from=workspace-deps /out/openclaw-required-platform-packages /tmp/openclaw-required-platform-packages
 
@@ -121,12 +124,17 @@ ARG GITHUB_ACTIONS=false
 # Copy pinned Bun binary from the official image instead of fetching via curl.
 COPY --from=bun-binary /usr/local/bin/bun /usr/local/bin/bun
 
-# Reduce OOM risk on low-memory hosts during dependency installation.
-# Docker builds on small VMs may otherwise fail with "Killed" (exit 137).
-# Source asset preparation builds external plugins before runtime pruning.
-# Its build dependencies stay in this disposable stage; production remains filtered.
+# Keep only build-time dependencies needed by the root, UI, shared workspace packages,
+# selected external plugins, and plugins that ship inside the root package.
+# The complete manifest set is still present so frozen-lockfile validation remains strict.
 RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
-    NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile \
+    set -eu; \
+    set -- --filter . --filter ./ui --filter './packages/*'; \
+    while IFS= read -r ext; do \
+      [ -n "$ext" ] || continue; \
+      set -- "$@" --filter "./${OPENCLAW_BUNDLED_PLUGIN_DIR}/${ext}..."; \
+    done < /tmp/openclaw-build-plugin-workspace-dirs; \
+    NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile "$@" \
       --config.supportedArchitectures.os=linux \
       --config.supportedArchitectures.cpu="$(node -p 'process.arch')" \
       --config.supportedArchitectures.libc=glibc
@@ -170,6 +178,7 @@ ENV OPENCLAW_PREFER_PNPM=1
 # stamp the complete release version before generating their build metadata.
 RUN set -eu; \
     selected_plugin_dirs="$(cat /tmp/openclaw-selected-plugin-dirs)"; \
+    build_plugin_asset_dirs="$(cat /tmp/openclaw-build-plugin-workspace-dirs)"; \
     if [ -n "$OPENCLAW_DOCKER_BUILD_VERSION" ]; then \
       pnpm pkg set "version=$OPENCLAW_DOCKER_BUILD_VERSION"; \
     fi; \
@@ -180,7 +189,7 @@ RUN set -eu; \
     if grep -qx 'qa-lab' /tmp/openclaw-selected-plugin-dirs; then \
       export OPENCLAW_BUILD_PRIVATE_QA=1 OPENCLAW_ENABLE_PRIVATE_QA_CLI=1; \
     fi; \
-    OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_IDS="$selected_plugin_dirs" OPENCLAW_RUN_NODE_SKIP_DTS_BUILD="$OPENCLAW_DOCKER_BUILD_SKIP_DTS" OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB="$OPENCLAW_DOCKER_BUILD_TSDOWN_MAX_OLD_SPACE_MB" NODE_OPTIONS="$OPENCLAW_DOCKER_BUILD_NODE_OPTIONS" pnpm_config_verify_deps_before_run=false pnpm build:docker; \
+    OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_IDS="$selected_plugin_dirs" OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS="$build_plugin_asset_dirs" OPENCLAW_RUN_NODE_SKIP_DTS_BUILD="$OPENCLAW_DOCKER_BUILD_SKIP_DTS" OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB="$OPENCLAW_DOCKER_BUILD_TSDOWN_MAX_OLD_SPACE_MB" NODE_OPTIONS="$OPENCLAW_DOCKER_BUILD_NODE_OPTIONS" pnpm_config_verify_deps_before_run=false pnpm build:docker; \
     pnpm_config_verify_deps_before_run=false pnpm ui:build
 RUN if grep -qx 'qa-lab' /tmp/openclaw-selected-plugin-dirs; then \
       pnpm_config_verify_deps_before_run=false pnpm qa:lab:build && \
