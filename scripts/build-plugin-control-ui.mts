@@ -56,8 +56,16 @@ async function buildBundledPluginControlUi(
 
 /** UI-only commands need static Settings presenters even without a runtime build. */
 async function prepareBundledSettingsControlUi(repoRoot: string): Promise<void> {
+  const dockerPluginAssetIds = process.env.OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS;
+  const dockerPluginAssetFilter =
+    typeof dockerPluginAssetIds === "string"
+      ? new Set(dockerPluginAssetIds.split(/[\s,]+/u).filter(Boolean))
+      : null;
   const selected: string[] = [];
   for (const entry of collectSourceCheckoutPluginBuildEntries({ cwd: repoRoot })) {
+    if (dockerPluginAssetFilter && !dockerPluginAssetFilter.has(entry.id)) {
+      continue;
+    }
     if (!isRecord(entry.packageJson) || !controlUiSource(entry.packageJson)) {
       continue;
     }

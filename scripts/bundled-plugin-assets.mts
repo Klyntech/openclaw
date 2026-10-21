@@ -272,9 +272,31 @@ export function parseBundledPluginAssetArgs(argv: string[]) {
   return { check, phase, plugins, ...(deferIsolated ? { deferIsolated } : {}) };
 }
 
+/**
+ * Resolve the default asset-hook filter for source Docker builds.
+ * Ordinary source builds and whole-repo stale-output checks remain unfiltered.
+ */
+export function resolveBundledPluginAssetPlugins(
+  requestedPlugins: string[],
+  check: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  if (check || requestedPlugins.length > 0) {
+    return requestedPlugins;
+  }
+  const selected = env.OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS?.trim();
+  if (!selected) {
+    return requestedPlugins;
+  }
+  return [...new Set(selected.split(/[\s,]+/u).filter(Boolean))].toSorted((a, b) =>
+    a.localeCompare(b),
+  );
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     const args = parseBundledPluginAssetArgs(process.argv.slice(2));
+    args.plugins = resolveBundledPluginAssetPlugins(args.plugins, args.check);
     await runBundledPluginAssetHooks(args);
     if (args.check) {
       const stale = listStaleGeneratedPluginAssets();

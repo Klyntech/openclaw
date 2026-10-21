@@ -46,6 +46,21 @@ const readHooks = (rootDir = process.cwd(), options = {}) =>
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 
+it("uses the Docker build asset filter only for non-check default runs", () => {
+  const env = {
+    OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS: "telegram,memory-core,document-extract",
+  } as NodeJS.ProcessEnv;
+
+  expect(assets.resolveBundledPluginAssetPlugins([], false, env)).toEqual([
+    "document-extract",
+    "memory-core",
+    "telegram",
+  ]);
+  expect(assets.resolveBundledPluginAssetPlugins(["canvas"], false, env)).toEqual(["canvas"]);
+  expect(assets.resolveBundledPluginAssetPlugins([], true, env)).toEqual([]);
+  expect(assets.resolveBundledPluginAssetPlugins([], false, {} as NodeJS.ProcessEnv)).toEqual([]);
+});
+
 it("reuses both Canvas dialects across candidates and invalidates changed inputs", () => {
   const workspace = tempDirs.make("openclaw-canvas-cache-");
   const cacheRoot = path.join(workspace, "cache");

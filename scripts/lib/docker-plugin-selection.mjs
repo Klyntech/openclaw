@@ -94,6 +94,33 @@ function collectRequiredBundledPluginDirs(params) {
     .map(({ dirName }) => dirName);
 }
 
+function collectRootBundledPluginDirs(params) {
+  const excluded = collectRootPackageExcludedExtensionDirs({
+    cwd: path.dirname(params.rootPackagePath),
+  });
+  return collectPluginIdentities(params.extensionsRoot)
+    .filter(({ dirName }) => {
+      if (excluded.has(dirName)) {
+        return false;
+      }
+      // Manifest-only plugins do not have a workspace package to install.
+      return fs.existsSync(path.join(params.extensionsRoot, dirName, "package.json"));
+    })
+    .map(({ dirName }) => dirName);
+}
+
+/**
+ * Workspace packages needed to build OpenClaw plus its selected Docker plugins:
+ * root-bundled plugins remain included, while unselected external plugins are omitted.
+ */
+export function resolveDockerBuildPluginWorkspaceDirs(params) {
+  const selected = resolveDockerPluginSelection(params);
+  const bundled = collectRootBundledPluginDirs(params);
+  return [...new Set([...selected, ...bundled])]
+    .filter((dirName) => fs.existsSync(path.join(params.extensionsRoot, dirName, "package.json")))
+    .toSorted((left, right) => left.localeCompare(right));
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     const params = {
@@ -108,6 +135,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
           ...collectRequiredBundledPluginDirs({ ...params, rootPackagePath: process.argv[5] }),
         ]),
       ].toSorted((left, right) => left.localeCompare(right));
+    } else if (process.argv[4] === "--build-workspace-plugin-dirs") {
+      resolved = resolveDockerBuildPluginWorkspaceDirs({
+        ...params,
+        rootPackagePath: process.argv[5],
+      });
     } else if (process.argv[4] === "--required-platform-packages") {
       resolved = [
         ...new Set(
