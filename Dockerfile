@@ -8,7 +8,7 @@
 # build layer is not invalidated by unrelated source changes.
 #
 # Build stages use full trixie; the runtime image is always trixie-slim.
-ARG OPENCLAW_EXTENSIONS=""
+ARG OPENCLAW_EXTENSIONS="telegram,nvidia,memory-core,document-extract,azure-speech,elevenlabs"
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR=extensions
 ARG OPENCLAW_DOCKER_BUILD_NODE_OPTIONS="--max-old-space-size=6144"
 ARG OPENCLAW_DOCKER_BUILD_TSDOWN_MAX_OLD_SPACE_MB="4352"
