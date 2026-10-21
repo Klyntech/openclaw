@@ -48,7 +48,7 @@ const git = (cwd: string, ...args: string[]) =>
 
 it("uses the Docker build asset filter only for non-check default runs", () => {
   const env = {
-    OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS: "telegram\\nmemory-core,document-extract",
+    OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_ASSET_IDS: "telegram,memory-core,document-extract",
   } as NodeJS.ProcessEnv;
 
   expect(assets.resolveBundledPluginAssetPlugins([], false, env)).toEqual([
