@@ -288,7 +288,7 @@ export function resolveBundledPluginAssetPlugins(
   if (!selected) {
     return requestedPlugins;
   }
-  return [...new Set(selected.split(/[\\s,]+/u).filter(Boolean))].toSorted((a, b) =>
+  return [...new Set(selected.split(/[\s,]+/u).filter(Boolean))].toSorted((a, b) =>
     a.localeCompare(b),
   );
 }
