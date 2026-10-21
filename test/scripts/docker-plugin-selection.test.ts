@@ -150,7 +150,10 @@ describe("Docker plugin selection", () => {
     writePlugin(extensionsRoot, "optional-provider", "optional", { "optional-sdk": "1.0.0" });
     const manifestOnly = path.join(extensionsRoot, "manifest-only");
     fs.mkdirSync(manifestOnly);
-    fs.writeFileSync(path.join(manifestOnly, "openclaw.plugin.json"), JSON.stringify({ id: "manifest-only" }));
+    fs.writeFileSync(
+      path.join(manifestOnly, "openclaw.plugin.json"),
+      JSON.stringify({ id: "manifest-only" }),
+    );
 
     expect(
       resolveDockerBuildPluginWorkspaceDirs({
@@ -162,7 +165,13 @@ describe("Docker plugin selection", () => {
 
     const command = spawnSync(
       process.execPath,
-      [selectorScript, extensionsRoot, "optional", "--build-workspace-plugin-dirs", rootPackagePath],
+      [
+        selectorScript,
+        extensionsRoot,
+        "optional",
+        "--build-workspace-plugin-dirs",
+        rootPackagePath,
+      ],
       { encoding: "utf8" },
     );
     expect(command.status, command.stderr).toBe(0);
