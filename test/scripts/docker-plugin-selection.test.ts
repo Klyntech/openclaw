@@ -143,7 +143,7 @@ describe("Docker plugin selection", () => {
     fs.mkdirSync(extensionsRoot);
     fs.writeFileSync(
       rootPackagePath,
-      `${JSON.stringify({ files: ["dist/", "!dist/extensions/optional-provider/**"] })}\\n`,
+      `${JSON.stringify({ files: ["dist/", "!dist/extensions/optional-provider/**"] })}\n`,
     );
     writePlugin(extensionsRoot, "bundled-provider", "bundled", { "provider-sdk": "1.0.0" });
     writePlugin(extensionsRoot, "bundled-without-deps", "without-deps");
@@ -166,7 +166,7 @@ describe("Docker plugin selection", () => {
       { encoding: "utf8" },
     );
     expect(command.status, command.stderr).toBe(0);
-    expect(command.stdout).toBe("bundled-provider\\nbundled-without-deps\\noptional-provider\\n");
+    expect(command.stdout).toBe("bundled-provider\nbundled-without-deps\noptional-provider\n");
   });
 
   it("resolves manifest ids and source directory names deterministically", () => {
