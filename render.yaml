@@ -3,15 +3,18 @@ services:
     name: nallyclaw
     runtime: docker
     plan: free
-    # The image CMD has no --allow-unconfigured, so a fresh ephemeral
-    # filesystem with no openclaw.json exits before binding.
-    dockerCommand: node openclaw.mjs gateway --allow-unconfigured
+    # Render must reach the gateway from outside the container; OpenClaw's
+    # default bind is loopback. Keep bind mode and public port explicit.
+    dockerCommand: node openclaw.mjs gateway --bind lan --port 8080 --allow-unconfigured
     healthCheckPath: /startupz
     envVars:
       # Start with a bounded V8 old-space heap. This is not a total RSS limit;
       # verify peak container memory with Telegram, tools, and voice workloads.
       - key: NODE_OPTIONS
         value: --max-old-space-size=256
+      # Keep Render's detected public port and OpenClaw's listener in sync.
+      - key: PORT
+        value: "8080"
       - key: OPENCLAW_GATEWAY_PORT
         value: "8080"
       - key: OPENCLAW_GATEWAY_TOKEN
