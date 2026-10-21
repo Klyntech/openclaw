@@ -3,7 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDockerPluginSelection } from "../../scripts/lib/docker-plugin-selection.mjs";
+import {
+  resolveDockerBuildPluginWorkspaceDirs,
+  resolveDockerPluginSelection,
+} from "../../scripts/lib/docker-plugin-selection.mjs";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -131,6 +134,39 @@ describe("Docker plugin selection", () => {
       "optional-native-darwin-arm64\noptional-native-linux-arm64\n",
     );
     expect(runSelector(extensionsRoot, "", undefined, true).stdout).toBe("");
+  });
+
+  it("limits build workspaces to root-bundled plugins plus explicit selections", () => {
+    const fixtureRoot = tempDirs.make("openclaw-docker-build-workspace-plugins-");
+    const extensionsRoot = path.join(fixtureRoot, "extensions");
+    const rootPackagePath = path.join(fixtureRoot, "package.json");
+    fs.mkdirSync(extensionsRoot);
+    fs.writeFileSync(
+      rootPackagePath,
+      `${JSON.stringify({ files: ["dist/", "!dist/extensions/optional-provider/**"] })}\\n`,
+    );
+    writePlugin(extensionsRoot, "bundled-provider", "bundled", { "provider-sdk": "1.0.0" });
+    writePlugin(extensionsRoot, "bundled-without-deps", "without-deps");
+    writePlugin(extensionsRoot, "optional-provider", "optional", { "optional-sdk": "1.0.0" });
+    const manifestOnly = path.join(extensionsRoot, "manifest-only");
+    fs.mkdirSync(manifestOnly);
+    fs.writeFileSync(path.join(manifestOnly, "openclaw.plugin.json"), JSON.stringify({ id: "manifest-only" }));
+
+    expect(
+      resolveDockerBuildPluginWorkspaceDirs({
+        extensionsRoot,
+        selection: "optional",
+        rootPackagePath,
+      }),
+    ).toEqual(["bundled-provider", "bundled-without-deps", "optional-provider"]);
+
+    const command = spawnSync(
+      process.execPath,
+      [selectorScript, extensionsRoot, "optional", "--build-workspace-plugin-dirs", rootPackagePath],
+      { encoding: "utf8" },
+    );
+    expect(command.status, command.stderr).toBe(0);
+    expect(command.stdout).toBe("bundled-provider\\nbundled-without-deps\\noptional-provider\\n");
   });
 
   it("resolves manifest ids and source directory names deterministically", () => {
