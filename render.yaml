@@ -8,6 +8,10 @@ services:
     dockerCommand: node openclaw.mjs gateway --allow-unconfigured
     healthCheckPath: /startupz
     envVars:
+      # Bound V8 old-space usage for the 512 MiB Render target. This is a
+      # starting guardrail, not proof that total process RSS fits the limit.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=256
       - key: OPENCLAW_GATEWAY_PORT
         value: "8080"
       - key: OPENCLAW_GATEWAY_TOKEN
